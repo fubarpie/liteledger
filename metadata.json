@@ -1,0 +1,6 @@
+{
+  "name": "KiteBooks - Small Business Accounting",
+  "description": "Multi-business bookkeeping with SimpleFIN bank sync, AI auto-categorization, bank statement reconciliation, P&L reports, and CPA tax exports.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
