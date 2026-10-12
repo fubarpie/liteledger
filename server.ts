@@ -1,5 +1,4 @@
 import express from "express";
-import { GoogleGenAI, Type } from "@google/genai";
 import dotenv from "dotenv";
 import path from "path";
 import { fileURLToPath } from "url";
@@ -14,20 +13,16 @@ const port = parseInt(process.env.PORT || "3000", 10);
 
 app.use(express.json({ limit: "10mb" }));
 
-// Initialize Gemini Client lazily so the app runs without an API key
-// (AI categorization is simply disabled until GEMINI_API_KEY is set).
-const GEMINI_MODEL = process.env.GEMINI_MODEL || "gemini-3.8-flash";
-let aiClient: GoogleGenAI | null = null;
-function getAI(): GoogleGenAI | null {
-  if (!process.env.GEMINI_API_KEY) return null;
-  if (!aiClient) {
-    aiClient = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
-  }
-  return aiClient;
-}
+// AI provider: OpenRouter (or any OpenAI-compatible endpoint, e.g. Ollama / LM Studio).
+// AI categorization is simply disabled until OPENROUTER_API_KEY is set
+// (a key is not required if OPENROUTER_BASE_URL points at a local server and AI_REQUIRE_KEY=false).
+const OPENROUTER_BASE_URL = (process.env.OPENROUTER_BASE_URL || "https://openrouter.ai/api/v1").replace(/\/+$/, "");
+const OPENROUTER_MODEL = process.env.OPENROUTER_MODEL || "google/gemini-2.5-flash";
+const AI_REQUIRE_KEY = process.env.AI_REQUIRE_KEY !== "false";
+const aiEnabled = () => !AI_REQUIRE_KEY || Boolean(process.env.OPENROUTER_API_KEY);
 
 app.get("/api/health", (_req, res) => {
-  res.json({ status: "ok", ai: Boolean(process.env.GEMINI_API_KEY) });
+  res.json({ status: "ok", ai: aiEnabled(), model: OPENROUTER_MODEL });
 });
 
 // ==========================================
@@ -290,14 +285,13 @@ function generateMockSimpleFinData() {
 }
 
 // ==========================================
-// AI Auto-Categorization (Gemini 3.8 Flash)
+// AI Auto-Categorization (OpenRouter)
 // ==========================================
 
 app.post("/api/ai/categorize", async (req, res) => {
   try {
-    const ai = getAI();
-    if (!ai) {
-      return res.status(503).json({ error: "AI categorization is disabled: GEMINI_API_KEY is not set on the server." });
+    if (!aiEnabled()) {
+      return res.status(503).json({ error: "AI categorization is disabled: OPENROUTER_API_KEY is not set on the server." });
     }
     const { transactions, categories, businessType } = req.body;
 
@@ -360,30 +354,43 @@ Transactions to categorize:
 ${JSON.stringify(simplifiedTx, null, 2)}
 `;
 
-    const response = await ai.models.generateContent({
-      model: GEMINI_MODEL,
-      contents: prompt,
-      config: {
-        responseMimeType: "application/json",
-        responseSchema: {
-          type: Type.ARRAY,
-          items: {
-            type: Type.OBJECT,
-            properties: {
-              id: { type: Type.STRING, description: "The transaction ID" },
-              categoryId: { type: Type.STRING, description: "The matched category ID" },
-              categoryName: { type: Type.STRING, description: "The readable category name" },
-              confidence: { type: Type.NUMBER, description: "Confidence score between 0 and 1" },
-              reasoning: { type: Type.STRING, description: "Short explanation for why this category was chosen" },
-              scheduleCLine: { type: Type.STRING, description: "IRS Schedule C line name or N/A" },
-            },
-            required: ["id", "categoryId", "categoryName", "confidence", "reasoning"],
-          },
-        },
-      },
-    });
+    const instruction = `${prompt}
+Respond with ONLY a JSON array (no markdown, no prose). Each element must be an object:
+{"id": string (transaction ID), "categoryId": string, "categoryName": string, "confidence": number 0-1, "reasoning": string, "scheduleCLine": string (IRS Schedule C line or "N/A")}`;
 
-    const parsed = JSON.parse(response.text || "[]");
+    const headers: Record<string, string> = {
+      "Content-Type": "application/json",
+      "HTTP-Referer": process.env.APP_URL || "https://github.com/fubarpie/liteledger",
+      "X-Title": "LiteLedger",
+    };
+    if (process.env.OPENROUTER_API_KEY) headers.Authorization = `Bearer ${process.env.OPENROUTER_API_KEY}`;
+
+    const aiRes = await fetch(`${OPENROUTER_BASE_URL}/chat/completions`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({
+        model: OPENROUTER_MODEL,
+        temperature: 0.1,
+        messages: [{ role: "user", content: instruction }],
+      }),
+    });
+    const aiBody: any = await aiRes.json().catch(() => ({}));
+    if (!aiRes.ok) {
+      const msg = aiBody?.error?.message || `AI provider returned HTTP ${aiRes.status}`;
+      return res.status(502).json({ error: msg });
+    }
+
+    const text: string = aiBody?.choices?.[0]?.message?.content || "[]";
+    const cleaned = text.replace(/```(?:json)?/gi, "").trim();
+    let parsed: any;
+    try {
+      parsed = JSON.parse(cleaned);
+    } catch {
+      const m = cleaned.match(/\[[\s\S]*\]/);
+      if (!m) return res.status(502).json({ error: "AI model returned a response that was not valid JSON. Try a different OPENROUTER_MODEL." });
+      parsed = JSON.parse(m[0]);
+    }
+    if (!Array.isArray(parsed)) parsed = Array.isArray(parsed?.suggestions) ? parsed.suggestions : [];
     return res.json({ suggestions: parsed });
   } catch (err: any) {
     console.error("AI Categorization Error:", err);

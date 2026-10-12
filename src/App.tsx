@@ -74,7 +74,7 @@ function MainApp() {
             <span>·</span>
             <span>Zero Subscription Aggregator Lock-in</span>
             <span>·</span>
-            <span>Powered by Gemini AI</span>
+            <span>Powered by OpenRouter</span>
           </div>
         </div>
       </footer>
