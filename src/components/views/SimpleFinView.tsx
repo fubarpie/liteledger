@@ -61,32 +61,24 @@ export const SimpleFinView: React.FC<SimpleFinViewProps> = ({ onOpenImportCsv })
     }
   };
 
-  const handleConnectWithDirectUrl = (e: React.FormEvent) => {
+  const handleConnectWithDirectUrl = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!accessUrlInput.trim()) return;
 
-    connectSimpleFinAccessUrl(accessUrlInput.trim(), false);
-    setStatusMessage('Access URL saved! Syncing accounts...');
-    setAccessUrlInput('');
-    syncSimpleFin().then(() => {
-      setStatusMessage('Bank feeds synced successfully.');
-    }).catch((err) => {
-      setStatusMessage(err.message || 'Sync failed.');
-    });
-  };
-
-  const handleTryDemoSandbox = async () => {
     setIsSubmitting(true);
     setStatusMessage(null);
     try {
-      const res = await connectSimpleFinWithToken('demo');
-      if (res.success) {
-        setStatusMessage('Connected to SimpleFIN Demo Sandbox. Syncing test accounts...');
-        await syncSimpleFin();
-        setStatusMessage('Demo accounts and recent bank feeds synced!');
+      const res = await connectSimpleFinAccessUrl(accessUrlInput.trim());
+      if (!res.success) {
+        setStatusMessage(res.error || 'Could not save the Access URL.');
+        return;
       }
+      setAccessUrlInput('');
+      setStatusMessage('Access URL saved! Syncing accounts...');
+      await syncSimpleFin();
+      setStatusMessage('Bank feeds synced successfully.');
     } catch (err: any) {
-      setStatusMessage(err.message || 'Demo connection failed.');
+      setStatusMessage(err.message || 'Sync failed.');
     } finally {
       setIsSubmitting(false);
     }
@@ -115,7 +107,7 @@ export const SimpleFinView: React.FC<SimpleFinViewProps> = ({ onOpenImportCsv })
                 isConnected ? 'bg-emerald-50 text-emerald-700' : 'bg-slate-100 text-slate-600'
               }`}
             >
-              {isConnected ? (bridgeConfig.isDemo ? 'Sandbox Demo' : 'Connected') : 'Disconnected'}
+              {isConnected ? 'Connected' : 'Disconnected'}
             </span>
           </div>
           <p className="text-xs text-slate-500 mt-1 max-w-2xl leading-relaxed">
@@ -221,15 +213,6 @@ export const SimpleFinView: React.FC<SimpleFinViewProps> = ({ onOpenImportCsv })
 
                 <button
                   type="button"
-                  onClick={handleTryDemoSandbox}
-                  disabled={isSubmitting}
-                  className="px-4 py-2 text-xs font-medium text-teal-800 bg-teal-50 hover:bg-teal-100 rounded-lg border border-teal-200 transition-colors"
-                >
-                  Try Demo SimpleFIN Sandbox
-                </button>
-
-                <button
-                  type="button"
                   onClick={() => setUseDirectUrl(true)}
                   className="text-xs text-slate-500 hover:text-slate-800 underline ml-auto"
                 >
@@ -255,7 +238,7 @@ export const SimpleFinView: React.FC<SimpleFinViewProps> = ({ onOpenImportCsv })
               <div className="flex items-center gap-3 pt-2">
                 <button
                   type="submit"
-                  disabled={!accessUrlInput.trim()}
+                  disabled={isSubmitting || !accessUrlInput.trim()}
                   className="px-4 py-2 text-xs font-semibold text-white bg-teal-700 hover:bg-teal-800 rounded-lg shadow-xs transition-colors disabled:opacity-50"
                 >
                   Save Access URL & Sync
@@ -291,7 +274,7 @@ export const SimpleFinView: React.FC<SimpleFinViewProps> = ({ onOpenImportCsv })
               </div>
               <div>
                 <div className="text-xs font-bold text-slate-900">
-                  {bridgeConfig.isDemo ? 'SimpleFIN Demo Sandbox Active' : 'SimpleFIN Bridge Connected'}
+                  SimpleFIN Bridge Connected
                 </div>
                 <div className="text-[11px] text-slate-400">
                   {bridgeConfig.lastSyncedAt
@@ -301,11 +284,6 @@ export const SimpleFinView: React.FC<SimpleFinViewProps> = ({ onOpenImportCsv })
               </div>
             </div>
 
-            <div className="text-xs font-mono text-slate-500 bg-slate-50 px-2.5 py-1 rounded-md border border-slate-100">
-              {bridgeConfig.accessUrl.includes('@')
-                ? `https://••••••••@${bridgeConfig.accessUrl.split('@')[1]}`
-                : 'https://bridge.simplefin.org/simplefin'}
-            </div>
           </div>
 
           {/* Accounts Feed Grid */}
@@ -314,6 +292,11 @@ export const SimpleFinView: React.FC<SimpleFinViewProps> = ({ onOpenImportCsv })
               Synced Accounts for {activeBusiness.name} ({accounts.length})
             </h3>
             <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+              {accounts.length === 0 && (
+                <div className="md:col-span-2 text-xs text-slate-500 p-4 rounded-lg border border-dashed border-slate-200 text-center">
+                  No accounts yet. They will appear here after your first sync.
+                </div>
+              )}
               {accounts.map((acc) => (
                 <div
                   key={acc.id}

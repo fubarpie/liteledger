@@ -8,9 +8,24 @@ services:
     restart: unless-stopped
     ports:
       - "${PORT:-3000}:3000"
+    volumes:
+      # ALL of your books live here (SQLite database + encryption key).
+      # Back this volume up. Deleting it deletes your data.
+      - liteledger-data:/data
     environment:
       PORT: 3000
+      DATA_DIR: /data
+      # Optional: a long random string used to encrypt bank-feed credentials.
+      # If unset, a key is generated once and stored in /data/secret.key.
+      LITELEDGER_SECRET: ${LITELEDGER_SECRET:-}
+      # Set true when running behind a reverse proxy (nginx, Caddy, Traefik, ...).
+      TRUST_PROXY: ${TRUST_PROXY:-false}
+      # auto | true | false. "auto" marks the session cookie Secure over HTTPS.
+      COOKIE_SECURE: ${COOKIE_SECURE:-auto}
       OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
       OPENROUTER_MODEL: ${OPENROUTER_MODEL:-google/gemini-2.5-flash}
       OPENROUTER_BASE_URL: ${OPENROUTER_BASE_URL:-https://openrouter.ai/api/v1}
       AI_REQUIRE_KEY: ${AI_REQUIRE_KEY:-true}
+
+volumes:
+  liteledger-data:

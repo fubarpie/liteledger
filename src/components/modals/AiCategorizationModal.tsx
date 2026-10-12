@@ -1,5 +1,6 @@
 import React from 'react';
 import { useAccounting } from '../../context/AccountingContext.tsx';
+import { useAuth } from '../../context/AuthContext.tsx';
 import { X, Sparkles, CheckCircle2, Tag } from 'lucide-react';
 
 interface AiCategorizationModalProps {
@@ -12,6 +13,7 @@ export const AiCategorizationModal: React.FC<AiCategorizationModalProps> = ({
   onClose,
 }) => {
   const { transactions, activeBusiness } = useAccounting();
+  const { aiEnabled } = useAuth();
 
   if (!isOpen) return null;
 
@@ -46,8 +48,14 @@ export const AiCategorizationModal: React.FC<AiCategorizationModalProps> = ({
         <div className="p-6 space-y-4 max-h-[70vh] overflow-y-auto">
           {aiCategorizedTxs.length === 0 ? (
             <div className="p-8 text-center text-xs text-slate-400">
-              No transactions have been categorized by AI yet. Run "AI Auto-Categorize" from the
-              Transactions register!
+              {aiEnabled ? (
+                <>No transactions have been categorized by AI yet. Run "AI Auto-Categorize" from the Transactions register.</>
+              ) : (
+                <>
+                  AI categorization isn't configured. Set <code className="font-mono">OPENROUTER_API_KEY</code> on the
+                  server and restart it to enable this feature.
+                </>
+              )}
             </div>
           ) : (
             <div className="space-y-3">

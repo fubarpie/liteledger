@@ -25,39 +25,50 @@ export const ReconciliationView: React.FC = () => {
     saveReconciliation,
     deleteReconciliation,
   } = useAccounting();
+  const safeAccounts = accounts || [];
+  const safeTransactions = transactions || [];
+  const safeRecs = reconciliations || [];
+
+  const toCents = (n: number) => Math.round((Number(n) || 0) * 100);
+  const fromCents = (c: number) => (c === 0 ? 0 : c / 100);
+  const pad2 = (n: number) => String(n).padStart(2, '0');
+  const localToday = () => {
+    const d = new Date();
+    return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`;
+  };
 
   // Mode: 'new_reconciliation' or 'history'
   const [activeTab, setActiveTab] = useState<'reconcile' | 'history'>('reconcile');
 
   // Selected Account to reconcile
   const [selectedAccountId, setSelectedAccountId] = useState<string>(
-    accounts[0]?.id || ''
+    safeAccounts[0]?.id || ''
   );
 
   useEffect(() => {
-    if (accounts.length > 0 && !accounts.some((a) => a.id === selectedAccountId)) {
-      setSelectedAccountId(accounts[0].id);
+    if (safeAccounts.length > 0 && !safeAccounts.some((a) => a.id === selectedAccountId)) {
+      setSelectedAccountId(safeAccounts[0].id);
+    } else if (safeAccounts.length === 0 && selectedAccountId) {
+      setSelectedAccountId('');
     }
-  }, [accounts, selectedAccountId]);
+  }, [safeAccounts, selectedAccountId]);
 
   const selectedAccount = useMemo(() => {
-    return accounts.find((a) => a.id === selectedAccountId) || accounts[0];
-  }, [accounts, selectedAccountId]);
-
-  // Find previous reconciliation for this account to pre-fill beginning balance
-  const previousReconciliation = useMemo(() => {
-    return reconciliations
-      .filter((r) => r.accountId === selectedAccountId && r.status === 'reconciled')
-      .sort((a, b) => new Date(b.statementDate).getTime() - new Date(a.statementDate).getTime())[0];
-  }, [reconciliations, selectedAccountId]);
+    return safeAccounts.find((a) => a.id === selectedAccountId) || safeAccounts[0];
+  }, [safeAccounts, selectedAccountId]);
 
   // Reconciliation form states
-  const todayStr = new Date().toISOString().split('T')[0];
-  const [statementDate, setStatementDate] = useState<string>(todayStr);
-  const [beginningBalance, setBeginningBalance] = useState<number>(() => {
-    return previousReconciliation ? previousReconciliation.statementEndingBalance : 0;
-  });
-  const [endingBalance, setEndingBalance] = useState<string>('0.00');
+  const [statementDate, setStatementDate] = useState<string>(localToday());
+  // Previous reconciled statement for this account (before the chosen statement date) -> beginning balance default
+  const previousReconciliation = useMemo(() => {
+    return safeRecs
+      .filter((r) => r.accountId === selectedAccountId && r.status === 'reconciled' && r.statementDate < statementDate)
+      .sort((x, y) => (y.statementDate < x.statementDate ? -1 : y.statementDate > x.statementDate ? 1 : 0))[0];
+  }, [safeRecs, selectedAccountId, statementDate]);
+  const [beginningBalance, setBeginningBalance] = useState<number>(() =>
+    previousReconciliation ? previousReconciliation.statementEndingBalance : 0
+  );
+  const [endingBalance, setEndingBalance] = useState<string>('');
   const [reconciliationNotes, setReconciliationNotes] = useState<string>('');
 
   // Cleared transaction IDs
@@ -70,18 +81,21 @@ export const ReconciliationView: React.FC = () => {
     } else {
       setBeginningBalance(0);
     }
+  }, [previousReconciliation]);
+
+  // Reset selections when account changes
+  useEffect(() => {
     setClearedTxIds(new Set());
-  }, [selectedAccountId, previousReconciliation]);
+    setEndingBalance('');
+  }, [selectedAccountId]);
 
   // Eligible transactions for this account up to statement date
   const eligibleTransactions = useMemo(() => {
-    return transactions.filter(
-      (t) =>
-        t.accountId === selectedAccountId &&
-        t.date <= statementDate &&
-        (!t.reconciled || clearedTxIds.has(t.id))
-    );
-  }, [transactions, selectedAccountId, statementDate, clearedTxIds]);
+    if (!selectedAccountId) return [];
+    return safeTransactions
+      .filter((t) => t.accountId === selectedAccountId && t.date <= statementDate && !t.reconciled)
+      .sort((x, y) => (x.date < y.date ? -1 : x.date > y.date ? 1 : 0));
+  }, [safeTransactions, selectedAccountId, statementDate]);
 
   // Separate deposits (inflow > 0) and withdrawals (outflow < 0)
   const deposits = useMemo(() => {
@@ -101,19 +115,23 @@ export const ReconciliationView: React.FC = () => {
     return withdrawals.filter((t) => clearedTxIds.has(t.id));
   }, [withdrawals, clearedTxIds]);
 
-  const totalClearedDeposits = clearedDeposits.reduce((sum, t) => sum + t.amount, 0);
-  const totalClearedWithdrawals = clearedWithdrawals.reduce(
-    (sum, t) => sum + Math.abs(t.amount),
-    0
-  );
+  // All money math in integer cents
+  const depositsC = clearedDeposits.reduce((sum, t) => sum + toCents(t.amount), 0);
+  const withdrawalsC = clearedWithdrawals.reduce((sum, t) => sum + Math.abs(toCents(t.amount)), 0);
+  const totalClearedDeposits = fromCents(depositsC);
+  const totalClearedWithdrawals = fromCents(withdrawalsC);
 
   // Cleared balance calculation
   // For standard checking/asset account: Beginning + Deposits - Withdrawals
   // For credit cards / liability: Same debit/credit mechanics
-  const clearedBalance = beginningBalance + totalClearedDeposits - totalClearedWithdrawals;
-  const parsedEndingBalance = parseFloat(endingBalance || '0') || 0;
-  const difference = Number((clearedBalance - parsedEndingBalance).toFixed(2));
-  const isBalanced = Math.abs(difference) < 0.009;
+  const clearedBalanceC = toCents(beginningBalance) + depositsC - withdrawalsC;
+  const parsedEnding = parseFloat(endingBalance);
+  const parsedEndingBalance = Number.isFinite(parsedEnding) ? Math.round(parsedEnding * 100) / 100 : 0;
+  const differenceC = clearedBalanceC - toCents(parsedEndingBalance);
+  const clearedBalance = fromCents(clearedBalanceC);
+  const difference = fromCents(differenceC);
+  const isBalanced = differenceC === 0;
+  const canFinalize = !!selectedAccount && !!activeBusiness && clearedTxIds.size > 0 && endingBalance.trim() !== '';
 
   // Toggle single item
   const handleToggleTx = (id: string) => {
@@ -158,12 +176,16 @@ export const ReconciliationView: React.FC = () => {
   // Quick match target balance
   const handleAutoMatchStatement = () => {
     // Select all eligible transactions
-    const allIds = eligibleTransactions.map((t) => t.id);
-    setClearedTxIds(new Set(allIds));
+    setClearedTxIds(new Set(eligibleTransactions.map((t) => t.id)));
   };
 
   // Finalize Reconciliation
   const handleFinalize = () => {
+    if (!canFinalize) return;
+    // Only transactions currently offered (unreconciled, <= statement date) may be locked
+    const eligibleIds = new Set(eligibleTransactions.map((t) => t.id));
+    const finalIds = Array.from(clearedTxIds).filter((id) => eligibleIds.has(id));
+    if (finalIds.length === 0) return;
     if (!isBalanced) {
       if (
         !confirm(
@@ -177,11 +199,11 @@ export const ReconciliationView: React.FC = () => {
     }
 
     const recRecord: Reconciliation = {
-      id: `rec_${Date.now()}`,
-      businessId: activeBusiness.id,
+      id: `rec_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+      businessId: activeBusiness!.id,
       accountId: selectedAccountId,
       statementDate,
-      statementBeginningBalance: beginningBalance,
+      statementBeginningBalance: Math.round(beginningBalance * 100) / 100,
       statementEndingBalance: parsedEndingBalance,
       clearedDepositsCount: clearedDeposits.length,
       clearedDepositsTotal: totalClearedDeposits,
@@ -191,7 +213,7 @@ export const ReconciliationView: React.FC = () => {
       difference,
       status: 'reconciled',
       reconciledAt: new Date().toISOString(),
-      clearedTransactionIds: Array.from(clearedTxIds),
+      clearedTransactionIds: finalIds,
       notes: reconciliationNotes || undefined,
     };
 
@@ -203,9 +225,9 @@ export const ReconciliationView: React.FC = () => {
   const formatCurrency = (val: number) => {
     return new Intl.NumberFormat('en-US', {
       style: 'currency',
-      currency: activeBusiness.currency || 'USD',
+      currency: activeBusiness?.currency || 'USD',
       minimumFractionDigits: 2,
-    }).format(val);
+    }).format(Number.isFinite(val) ? val : 0);
   };
 
   return (
@@ -248,13 +270,17 @@ export const ReconciliationView: React.FC = () => {
                   : 'text-slate-600 hover:text-slate-900'
               }`}
             >
-              Reconciliation History ({reconciliations.length})
+              Reconciliation History ({safeRecs.length})
             </button>
           </div>
         </div>
       </div>
 
-      {activeTab === 'reconcile' ? (
+      {activeTab === 'reconcile' && safeAccounts.length === 0 ? (
+        <div className="bg-white p-10 rounded-xl border border-slate-200 shadow-xs text-center text-xs text-slate-500">
+          No accounts yet. Add an account (or connect SimpleFIN) before reconciling a statement.
+        </div>
+      ) : activeTab === 'reconcile' ? (
         <div className="space-y-6">
           {/* Step 1: Account & Statement Inputs */}
           <div className="bg-white p-5 rounded-xl border border-slate-200 shadow-xs space-y-4">
@@ -273,7 +299,8 @@ export const ReconciliationView: React.FC = () => {
                   onChange={(e) => setSelectedAccountId(e.target.value)}
                   className="w-full px-3 py-2 text-xs rounded-lg border border-slate-200 bg-white focus:outline-none focus:ring-1 focus:ring-teal-500 font-medium"
                 >
-                  {accounts.map((a) => (
+                  {safeAccounts.length === 0 && <option value="">No accounts</option>}
+                  {safeAccounts.map((a) => (
                     <option key={a.id} value={a.id}>
                       {a.name} (•••• {a.accountNumberLast4}) - {formatCurrency(a.currentBalance)}
                     </option>
@@ -305,13 +332,13 @@ export const ReconciliationView: React.FC = () => {
                     type="number"
                     step="0.01"
                     value={beginningBalance}
-                    onChange={(e) => setBeginningBalance(parseFloat(e.target.value) || 0)}
+                    onChange={(e) => setBeginningBalance(Math.round((parseFloat(e.target.value) || 0) * 100) / 100)}
                     className="w-full pl-7 pr-3 py-2 text-xs rounded-lg border border-slate-200 focus:outline-none focus:ring-1 focus:ring-teal-500 font-mono"
                   />
                 </div>
                 {previousReconciliation && (
                   <span className="text-[10px] text-slate-400 mt-0.5 block">
-                    Auto-filled from {previousReconciliation.statementDate}
+                    Auto-filled from statement ending {previousReconciliation.statementDate}
                   </span>
                 )}
               </div>
@@ -425,7 +452,8 @@ export const ReconciliationView: React.FC = () => {
                 </button>
                 <button
                   onClick={handleFinalize}
-                  className={`px-4 py-2 text-xs font-semibold rounded-lg shadow-xs transition-colors flex items-center gap-1.5 ${
+                  disabled={!canFinalize}
+                  className={`px-4 py-2 text-xs font-semibold rounded-lg shadow-xs transition-colors flex items-center gap-1.5 disabled:opacity-50 disabled:cursor-not-allowed ${
                     isBalanced
                       ? 'bg-teal-700 hover:bg-teal-800 text-white'
                       : 'bg-slate-800 hover:bg-slate-900 text-white'
@@ -573,7 +601,7 @@ export const ReconciliationView: React.FC = () => {
               Completed Reconciliations Audit Trail
             </h2>
             <p className="text-xs text-slate-500 mt-0.5">
-              Historical statements reconciled and verified for {activeBusiness.name}.
+              Historical statements reconciled and verified for {activeBusiness?.name}. Transactions in a saved reconciliation are locked.
             </p>
           </div>
 
@@ -592,22 +620,24 @@ export const ReconciliationView: React.FC = () => {
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-100">
-                {reconciliations.length === 0 ? (
+                {safeRecs.length === 0 ? (
                   <tr>
                     <td colSpan={8} className="py-12 text-center text-slate-400">
                       No reconciled statements found for this business yet.
                     </td>
                   </tr>
                 ) : (
-                  reconciliations.map((rec) => {
-                    const acc = accounts.find((a) => a.id === rec.accountId);
+                  [...safeRecs]
+                    .sort((x, y) => (y.statementDate < x.statementDate ? -1 : y.statementDate > x.statementDate ? 1 : 0))
+                    .map((rec) => {
+                    const acc = safeAccounts.find((a) => a.id === rec.accountId);
                     return (
                       <tr key={rec.id} className="hover:bg-slate-50/60">
                         <td className="py-3 px-4 font-mono font-semibold text-slate-900">
                           {rec.statementDate}
                         </td>
                         <td className="py-3 px-4 font-medium text-slate-800">
-                          {acc?.name || 'Account'} (•••• {acc?.accountNumberLast4 || '0000'})
+                          {acc ? `${acc.name} (•••• ${acc.accountNumberLast4})` : 'Deleted account'}
                         </td>
                         <td className="py-3 px-4 text-right font-mono text-slate-600">
                           {formatCurrency(rec.statementBeginningBalance)}
@@ -617,7 +647,7 @@ export const ReconciliationView: React.FC = () => {
                         </td>
                         <td className="py-3 px-4 text-center">
                           <span className="bg-emerald-50 text-emerald-700 px-2 py-0.5 rounded font-medium text-[11px]">
-                            {rec.clearedTransactionIds.length} items
+                            {(rec.clearedTransactionIds || []).length} items
                           </span>
                         </td>
                         <td className="py-3 px-4 text-slate-500 text-[11px]">
@@ -631,15 +661,16 @@ export const ReconciliationView: React.FC = () => {
                         <td className="py-3 px-4 text-center">
                           <button
                             onClick={() => {
-                              if (confirm('Delete this reconciliation? This will unmark associated transactions.')) {
+                              if (confirm(`WARNING: Deleting this reconciliation UNLOCKS its ${(rec.clearedTransactionIds || []).length} transactions, making them editable and available for reconciliation again. Continue?`)) {
                                 deleteReconciliation(rec.id);
                               }
                             }}
-                            className="p-1 text-slate-400 hover:text-rose-600 rounded transition-colors"
-                            title="Delete reconciliation record"
+                            className="p-1 text-slate-400 hover:text-rose-600 rounded transition-colors inline-flex items-center gap-1"
+                            title="Delete reconciliation record — this unlocks its transactions"
                           >
                             <Trash2 className="w-3.5 h-3.5" />
                           </button>
+                          <div className="text-[10px] text-amber-700 mt-0.5">⚠ Unlocks {(rec.clearedTransactionIds || []).length} txns</div>
                         </td>
                       </tr>
                     );

@@ -15,115 +15,122 @@ import { Category } from '../../types.ts';
 
 export const ProfitLossView: React.FC = () => {
   const { activeBusiness, categories, transactions } = useAccounting();
+  const safeCategories = categories || [];
+  const safeTransactions = transactions || [];
 
-  // Date Presets
-  const [periodPreset, setPeriodPreset] = useState<string>('ytd');
+  // Date helpers (local time, never UTC-shifted)
+  const pad = (n: number) => String(n).padStart(2, '0');
+  const fmtDate = (d: Date) => `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+  const toCents = (n: number) => Math.round((Number(n) || 0) * 100);
+
+  // Fiscal year containing `ref`, from activeBusiness.fiscalYearEnd ('MM-DD')
+  const fiscalYearRange = (ref: Date, offset = 0) => {
+    const m = /^(\d{1,2})-(\d{1,2})$/.exec(activeBusiness?.fiscalYearEnd || '');
+    let endMonth = m ? Number(m[1]) : 12;
+    let endDay = m ? Number(m[2]) : 31;
+    if (endMonth < 1 || endMonth > 12) { endMonth = 12; endDay = 31; }
+    const lastDay = (y: number) => new Date(y, endMonth, 0).getDate();
+    const endIn = (y: number) => new Date(y, endMonth - 1, Math.min(Math.max(endDay, 1), lastDay(y)));
+    let endYear = ref.getFullYear();
+    if (ref > endIn(endYear)) endYear += 1;
+    endYear += offset;
+    const end = endIn(endYear);
+    const prevEnd = endIn(endYear - 1);
+    const start = new Date(prevEnd.getFullYear(), prevEnd.getMonth(), prevEnd.getDate() + 1);
+    return { start, end };
+  };
+
   const now = new Date();
-  const currentYear = now.getFullYear();
-
-  // Custom date range
-  const [startDate, setStartDate] = useState<string>(`${currentYear}-01-01`);
-  const [endDate, setEndDate] = useState<string>(now.toISOString().split('T')[0]);
+  const initialFy = fiscalYearRange(now);
+  const [periodPreset, setPeriodPreset] = useState<string>('ytd');
+  const [startDate, setStartDate] = useState<string>(fmtDate(initialFy.start));
+  const [endDate, setEndDate] = useState<string>(fmtDate(now));
 
   const handlePresetChange = (preset: string) => {
     setPeriodPreset(preset);
-    const yr = now.getFullYear();
-    const mo = now.getMonth();
+    const cur = new Date();
+    const yr = cur.getFullYear();
+    const mo = cur.getMonth();
 
     if (preset === 'this_month') {
-      const start = new Date(yr, mo, 1).toISOString().split('T')[0];
-      const end = new Date(yr, mo + 1, 0).toISOString().split('T')[0];
-      setStartDate(start);
-      setEndDate(end);
+      setStartDate(fmtDate(new Date(yr, mo, 1)));
+      setEndDate(fmtDate(new Date(yr, mo + 1, 0)));
     } else if (preset === 'last_month') {
-      const start = new Date(yr, mo - 1, 1).toISOString().split('T')[0];
-      const end = new Date(yr, mo, 0).toISOString().split('T')[0];
-      setStartDate(start);
-      setEndDate(end);
+      setStartDate(fmtDate(new Date(yr, mo - 1, 1)));
+      setEndDate(fmtDate(new Date(yr, mo, 0)));
     } else if (preset === 'this_quarter') {
       const qMonth = Math.floor(mo / 3) * 3;
-      const start = new Date(yr, qMonth, 1).toISOString().split('T')[0];
-      const end = new Date(yr, qMonth + 3, 0).toISOString().split('T')[0];
-      setStartDate(start);
-      setEndDate(end);
+      setStartDate(fmtDate(new Date(yr, qMonth, 1)));
+      setEndDate(fmtDate(new Date(yr, qMonth + 3, 0)));
     } else if (preset === 'ytd') {
-      setStartDate(`${yr}-01-01`);
-      setEndDate(now.toISOString().split('T')[0]);
+      setStartDate(fmtDate(fiscalYearRange(cur).start));
+      setEndDate(fmtDate(cur));
     } else if (preset === 'last_year') {
-      setStartDate(`${yr - 1}-01-01`);
-      setEndDate(`${yr - 1}-12-31`);
+      const fy = fiscalYearRange(cur, -1);
+      setStartDate(fmtDate(fy.start));
+      setEndDate(fmtDate(fy.end));
     } else if (preset === 'all') {
-      setStartDate('2020-01-01');
-      setEndDate('2030-12-31');
+      setStartDate('0000-01-01');
+      setEndDate('9999-12-31');
     }
   };
 
   // Filter transactions within period
   const periodTransactions = useMemo(() => {
-    return transactions.filter(
+    return safeTransactions.filter(
       (t) => t.date >= startDate && t.date <= endDate
     );
-  }, [transactions, startDate, endDate]);
+  }, [safeTransactions, startDate, endDate]);
 
-  // Group transactions by category ID
-  const categoryTotals = useMemo(() => {
+  // Group transactions by category ID (integer cents; transfers/equity never reach the P&L)
+  const categoryTotalsCents = useMemo(() => {
     const map = new Map<string, number>();
     periodTransactions.forEach((t) => {
       if (t.categoryId) {
-        const cur = map.get(t.categoryId) || 0;
-        map.set(t.categoryId, cur + t.amount);
+        map.set(t.categoryId, (map.get(t.categoryId) || 0) + toCents(t.amount));
       }
     });
     return map;
   }, [periodTransactions]);
 
-  // Categories segregated by type
-  const incomeCategories = useMemo(
-    () => categories.filter((c) => c.type === 'income'),
-    [categories]
-  );
-  const cogsCategories = useMemo(
-    () => categories.filter((c) => c.type === 'cogs'),
-    [categories]
-  );
-  const expenseCategories = useMemo(
-    () => categories.filter((c) => c.type === 'expense'),
-    [categories]
-  );
+  // Signed dollars per category: income = inflows - refunds, cogs/expense = outflows - refunds
+  const amountFor = (c: Category) => {
+    const cents = categoryTotalsCents.get(c.id) || 0;
+    const v = c.type === 'income' ? cents : -cents;
+    return (v === 0 ? 0 : v) / 100;
+  };
 
-  // Totals
-  const totalRevenue = incomeCategories.reduce((sum, c) => {
-    const amt = categoryTotals.get(c.id) || 0;
-    return sum + (amt > 0 ? amt : 0);
-  }, 0);
+  const incomeCategories = useMemo(() => safeCategories.filter((c) => c.type === 'income'), [safeCategories]);
+  const cogsCategories = useMemo(() => safeCategories.filter((c) => c.type === 'cogs'), [safeCategories]);
+  const expenseCategories = useMemo(() => safeCategories.filter((c) => c.type === 'expense'), [safeCategories]);
 
-  const totalCOGS = cogsCategories.reduce((sum, c) => {
-    const amt = categoryTotals.get(c.id) || 0;
-    return sum + Math.abs(amt);
-  }, 0);
+  const sumCents = (cats: Category[]) =>
+    cats.reduce((sum, c) => sum + (c.type === 'income' ? 1 : -1) * (categoryTotalsCents.get(c.id) || 0), 0);
+  const revenueC = sumCents(incomeCategories);
+  const cogsC = sumCents(cogsCategories);
+  const opexC = sumCents(expenseCategories);
 
-  const grossProfit = totalRevenue - totalCOGS;
-  const grossMargin = totalRevenue > 0 ? (grossProfit / totalRevenue) * 100 : 0;
+  const totalRevenue = revenueC / 100;
+  const totalCOGS = cogsC / 100;
+  const grossProfit = (revenueC - cogsC) / 100;
+  const grossMargin = revenueC > 0 ? ((revenueC - cogsC) / revenueC) * 100 : 0;
+  const totalOperatingExpenses = opexC / 100;
+  const netIncome = (revenueC - cogsC - opexC) / 100;
+  const netMargin = revenueC > 0 ? ((revenueC - cogsC - opexC) / revenueC) * 100 : 0;
 
-  const totalOperatingExpenses = expenseCategories.reduce((sum, c) => {
-    const amt = categoryTotals.get(c.id) || 0;
-    return sum + Math.abs(amt);
-  }, 0);
-
-  const netIncome = grossProfit - totalOperatingExpenses;
-  const netMargin = totalRevenue > 0 ? (netIncome / totalRevenue) * 100 : 0;
-
-  // Uncategorized total within period
-  const uncategorizedAmount = periodTransactions
-    .filter((t) => !t.categoryId)
-    .reduce((sum, t) => sum + t.amount, 0);
+  // Uncategorized (no category, or category no longer exists) within period; excluded from totals
+  const knownCategoryIds = useMemo(() => new Set(safeCategories.map((c) => c.id)), [safeCategories]);
+  const uncategorizedTxs = periodTransactions.filter((t) => !t.categoryId || !knownCategoryIds.has(t.categoryId));
+  const uncategorizedAmount = uncategorizedTxs.reduce((sum, t) => sum + toCents(t.amount), 0) / 100;
+  const uncategorizedCount = uncategorizedTxs.length;
+  const hasAnyCategories = safeCategories.some((c) => ['income', 'cogs', 'expense'].includes(c.type));
 
   const formatCurrency = (val: number) => {
     return new Intl.NumberFormat('en-US', {
       style: 'currency',
-      currency: activeBusiness.currency || 'USD',
+      currency: activeBusiness?.currency || 'USD',
       minimumFractionDigits: 2,
-    }).format(val);
+    }).format(Number.isFinite(val) ? val : 0);
   };
 
   // CSV Export Handler
@@ -138,7 +145,7 @@ export const ProfitLossView: React.FC = () => {
       ...incomeCategories.map((c) => [
         c.name,
         c.scheduleCLine,
-        (categoryTotals.get(c.id) || 0).toFixed(2),
+        amountFor(c).toFixed(2),
       ]),
       ['TOTAL REVENUE', '', totalRevenue.toFixed(2)],
       [''],
@@ -146,7 +153,7 @@ export const ProfitLossView: React.FC = () => {
       ...cogsCategories.map((c) => [
         c.name,
         c.scheduleCLine,
-        Math.abs(categoryTotals.get(c.id) || 0).toFixed(2),
+        amountFor(c).toFixed(2),
       ]),
       ['TOTAL COGS', '', totalCOGS.toFixed(2)],
       ['GROSS PROFIT', '', grossProfit.toFixed(2)],
@@ -155,27 +162,33 @@ export const ProfitLossView: React.FC = () => {
       ...expenseCategories.map((c) => [
         c.name,
         c.scheduleCLine,
-        Math.abs(categoryTotals.get(c.id) || 0).toFixed(2),
+        amountFor(c).toFixed(2),
       ]),
       ['TOTAL OPERATING EXPENSES', '', totalOperatingExpenses.toFixed(2)],
       [''],
       ['NET PROFIT / LOSS', '', netIncome.toFixed(2)],
+      [''],
+      [`Uncategorized (${uncategorizedCount} txns, excluded from totals; net inflow)`, '', uncategorizedAmount.toFixed(2)],
     ];
 
-    const csvContent =
-      'data:text/csv;charset=utf-8,' +
-      rows.map((r) => r.map((cell) => `"${cell}"`).join(',')).join('\n');
-
-    const encodedUri = encodeURI(csvContent);
+    const esc = (cell: unknown) => {
+      let v = String(cell ?? '');
+      if (/^[=+\-@\t\r]/.test(v) && !/^-?\d+(\.\d+)?$/.test(v)) v = "'" + v;
+      return `"${v.replace(/"/g, '""')}"`;
+    };
+    const csv = rows.map((r) => r.map(esc).join(',')).join('\r\n');
+    const blob = new Blob(['\uFEFF' + csv], { type: 'text/csv;charset=utf-8' });
+    const encodedUri = URL.createObjectURL(blob);
     const link = document.createElement('a');
     link.setAttribute('href', encodedUri);
     link.setAttribute(
       'download',
-      `Profit_Loss_${activeBusiness.name.replace(/\s+/g, '_')}_${startDate}_to_${endDate}.csv`
+      `Profit_Loss_${(activeBusiness?.name || 'business').replace(/[^A-Za-z0-9]+/g, '_')}_${periodPreset === 'all' ? 'all_time' : `${startDate}_to_${endDate}`}.csv`
     );
     document.body.appendChild(link);
     link.click();
     document.body.removeChild(link);
+    setTimeout(() => URL.revokeObjectURL(encodedUri), 1000);
   };
 
   const handlePrint = () => {
@@ -312,13 +325,20 @@ export const ProfitLossView: React.FC = () => {
       </div>
 
       {/* Uncategorized Warning if any exist in period */}
-      {Math.abs(uncategorizedAmount) > 0 && (
+      {uncategorizedCount > 0 && (
         <div className="bg-amber-50 border border-amber-200 rounded-xl p-3.5 text-xs text-amber-800 flex items-center justify-between">
           <span>
-            ⚠️ Notice: You have transactions totaling {formatCurrency(uncategorizedAmount)} that
-            are currently uncategorized in this date range. They are excluded from the report
-            below.
+            ⚠️ Notice: {uncategorizedCount} Uncategorized transaction{uncategorizedCount === 1 ? '' : 's'} (net{' '}
+            {formatCurrency(uncategorizedAmount)}) in this date range are excluded from the report
+            below. Categorize them for an accurate P&L.
           </span>
+        </div>
+      )}
+
+      {!hasAnyCategories && (
+        <div className="bg-slate-50 border border-slate-200 rounded-xl p-6 text-center text-xs text-slate-500">
+          No income or expense categories exist for this business yet. Add categories and categorize
+          transactions to populate this report.
         </div>
       )}
 
@@ -331,7 +351,7 @@ export const ProfitLossView: React.FC = () => {
           </h2>
           <div className="text-sm font-semibold text-slate-700">Statement of Profit & Loss</div>
           <div className="text-xs text-slate-500">
-            For the period {startDate} to {endDate}
+            {periodPreset === 'all' ? 'For all time' : `For the period ${startDate} to ${endDate}`}
           </div>
         </div>
 
@@ -343,8 +363,11 @@ export const ProfitLossView: React.FC = () => {
               <span>Amount</span>
             </div>
             <div className="divide-y divide-slate-100">
+              {incomeCategories.length === 0 && (
+                <div className="py-2.5 text-xs text-slate-400 italic">No categories of this type</div>
+              )}
               {incomeCategories.map((c) => {
-                const amt = categoryTotals.get(c.id) || 0;
+                const amt = amountFor(c);
                 return (
                   <div key={c.id} className="py-2.5 flex items-center justify-between text-xs">
                     <div>
@@ -369,8 +392,11 @@ export const ProfitLossView: React.FC = () => {
               <span>Amount</span>
             </div>
             <div className="divide-y divide-slate-100">
+              {cogsCategories.length === 0 && (
+                <div className="py-2.5 text-xs text-slate-400 italic">No categories of this type</div>
+              )}
               {cogsCategories.map((c) => {
-                const amt = Math.abs(categoryTotals.get(c.id) || 0);
+                const amt = amountFor(c);
                 return (
                   <div key={c.id} className="py-2.5 flex items-center justify-between text-xs">
                     <div>
@@ -406,8 +432,11 @@ export const ProfitLossView: React.FC = () => {
               <span>Amount</span>
             </div>
             <div className="divide-y divide-slate-100">
+              {expenseCategories.length === 0 && (
+                <div className="py-2.5 text-xs text-slate-400 italic">No categories of this type</div>
+              )}
               {expenseCategories.map((c) => {
-                const amt = Math.abs(categoryTotals.get(c.id) || 0);
+                const amt = amountFor(c);
                 return (
                   <div key={c.id} className="py-2.5 flex items-center justify-between text-xs">
                     <div>
@@ -424,6 +453,13 @@ export const ProfitLossView: React.FC = () => {
               <span className="font-mono text-sm">{formatCurrency(totalOperatingExpenses)}</span>
             </div>
           </div>
+
+          {uncategorizedCount > 0 && (
+            <div className="flex items-center justify-between text-xs px-1 text-amber-700">
+              <span className="font-medium">⚠️ Uncategorized ({uncategorizedCount}) — not included above</span>
+              <span className="font-mono">{formatCurrency(uncategorizedAmount)}</span>
+            </div>
+          )}
 
           {/* Final Bottom Line: Net Income */}
           <div

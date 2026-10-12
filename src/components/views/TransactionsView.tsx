@@ -13,20 +13,29 @@ import {
   Check,
   ChevronDown,
   Info,
+  Pencil,
+  Lock,
+  AlertTriangle,
+  X,
 } from 'lucide-react';
 import { Transaction, Category } from '../../types.ts';
+import { useAuth } from '../../context/AuthContext.tsx';
 
 interface TransactionsViewProps {
   onOpenAddTransaction: () => void;
   onOpenImportCsv: () => void;
   onOpenAiReview: () => void;
+  /** Open the edit modal for a transaction. */
+  onEditTransaction: (tx: Transaction) => void;
 }
 
 export const TransactionsView: React.FC<TransactionsViewProps> = ({
   onOpenAddTransaction,
   onOpenImportCsv,
   onOpenAiReview,
+  onEditTransaction,
 }) => {
+  const { aiEnabled } = useAuth();
   const {
     activeBusiness,
     accounts,
@@ -46,6 +55,10 @@ export const TransactionsView: React.FC<TransactionsViewProps> = ({
   const [selectedTxIds, setSelectedTxIds] = useState<Set<string>>(new Set());
   const [batchCategoryModalOpen, setBatchCategoryModalOpen] = useState(false);
   const [activeAiExplainTx, setActiveAiExplainTx] = useState<Transaction | null>(null);
+  const [aiError, setAiError] = useState<string | null>(null);
+  const [bulkMessage, setBulkMessage] = useState<string | null>(null);
+  const [confirmBulkDelete, setConfirmBulkDelete] = useState(false);
+  const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
 
   // Group categories by type
   const groupedCategories = useMemo(() => {
@@ -128,18 +141,35 @@ export const TransactionsView: React.FC<TransactionsViewProps> = ({
     setBatchCategoryModalOpen(false);
   };
 
+  const selectedTxs = transactions.filter((t) => selectedTxIds.has(t.id));
+  const selectedReconciledCount = selectedTxs.filter((t) => t.reconciled).length;
+
   const handleBatchDelete = () => {
-    if (selectedTxIds.size === 0) return;
-    if (confirm(`Are you sure you want to delete ${selectedTxIds.size} transactions?`)) {
-      selectedTxIds.forEach((id) => deleteTransaction(id));
-      setSelectedTxIds(new Set());
+    const deletable = selectedTxs.filter((t) => !t.reconciled);
+    const skipped = selectedTxs.length - deletable.length;
+    deletable.forEach((t) => deleteTransaction(t.id));
+    setSelectedTxIds(new Set());
+    setConfirmBulkDelete(false);
+    setBulkMessage(
+      `Deleted ${deletable.length} transaction${deletable.length === 1 ? '' : 's'}.` +
+        (skipped ? ` Skipped ${skipped} reconciled transaction${skipped === 1 ? '' : 's'} (delete the reconciliation first).` : '')
+    );
+  };
+
+  const runAi = async (ids?: string[]) => {
+    setAiError(null);
+    try {
+      const res = await autoCategorizeWithAI(ids);
+      if (res.suggestions.length > 0) onOpenAiReview();
+      return res;
+    } catch (e: any) {
+      setAiError(e?.message || 'AI categorization failed.');
     }
   };
 
   const handleBatchAiCategorize = async () => {
     if (selectedTxIds.size === 0) return;
-    const targetIds = Array.from(selectedTxIds);
-    await autoCategorizeWithAI(targetIds);
+    await runAi(Array.from(selectedTxIds));
     setSelectedTxIds(new Set());
   };
 
@@ -185,16 +215,10 @@ export const TransactionsView: React.FC<TransactionsViewProps> = ({
           </button>
 
           <button
-            onClick={() => {
-              autoCategorizeWithAI()
-                .then((res) => {
-                  if (res.suggestions.length > 0) onOpenAiReview();
-                })
-                .catch(() => {});
-            }}
-            disabled={isAiCategorizing || uncategorizedCount === 0}
+            onClick={() => runAi()}
+            disabled={isAiCategorizing || uncategorizedCount === 0 || !aiEnabled}
             className="flex items-center gap-1.5 px-3.5 py-1.5 text-xs font-semibold text-white bg-teal-600 hover:bg-teal-700 rounded-lg shadow-xs transition-colors disabled:opacity-50"
-            title="Automatically categorize uncategorized transactions with AI"
+            title={aiEnabled ? 'Automatically categorize uncategorized transactions with AI' : 'AI is not configured. Set OPENROUTER_API_KEY on the server to enable it.'}
           >
             <Sparkles className={`w-3.5 h-3.5 ${isAiCategorizing ? 'animate-spin' : ''}`} />
             <span>
@@ -288,6 +312,31 @@ export const TransactionsView: React.FC<TransactionsViewProps> = ({
         </div>
       </div>
 
+      {!aiEnabled && (
+        <div className="flex items-start gap-2 p-2.5 rounded-xl bg-slate-50 border border-slate-200 text-[11px] text-slate-600">
+          <Info className="w-3.5 h-3.5 mt-0.5 shrink-0" />
+          <span>AI categorization is off. Set <code className="font-mono">OPENROUTER_API_KEY</code> on the server and restart to enable it.</span>
+        </div>
+      )}
+      {aiError && (
+        <div className="flex items-start gap-2 p-2.5 rounded-xl bg-rose-50 border border-rose-200 text-[11px] text-rose-800">
+          <AlertTriangle className="w-3.5 h-3.5 mt-0.5 shrink-0" />
+          <span className="flex-1">
+            {aiError}
+            {/openrouter|not configured|api key/i.test(aiError) && (
+              <> Set <code className="font-mono">OPENROUTER_API_KEY</code> on the server to enable AI.</>
+            )}
+          </span>
+          <button onClick={() => setAiError(null)}><X className="w-3.5 h-3.5" /></button>
+        </div>
+      )}
+      {bulkMessage && (
+        <div className="flex items-start gap-2 p-2.5 rounded-xl bg-teal-50 border border-teal-200 text-[11px] text-teal-900">
+          <span className="flex-1">{bulkMessage}</span>
+          <button onClick={() => setBulkMessage(null)}><X className="w-3.5 h-3.5" /></button>
+        </div>
+      )}
+
       {/* Batch Action Strip (Shown when rows selected) */}
       {selectedTxIds.size > 0 && (
         <div className="bg-teal-50 border border-teal-200 p-2.5 rounded-xl flex items-center justify-between gap-3 text-xs text-teal-900 shadow-xs animate-in fade-in">
@@ -336,20 +385,38 @@ export const TransactionsView: React.FC<TransactionsViewProps> = ({
 
             <button
               onClick={handleBatchAiCategorize}
-              disabled={isAiCategorizing}
-              className="px-3 py-1.5 bg-teal-600 hover:bg-teal-700 text-white rounded-lg font-medium flex items-center gap-1.5 shadow-xs"
+              disabled={isAiCategorizing || !aiEnabled}
+              title={aiEnabled ? undefined : 'AI is not configured (OPENROUTER_API_KEY)'}
+              className="px-3 py-1.5 bg-teal-600 hover:bg-teal-700 text-white rounded-lg font-medium flex items-center gap-1.5 shadow-xs disabled:opacity-50"
             >
               <Sparkles className="w-3.5 h-3.5" />
               <span>AI Categorize Selected</span>
             </button>
 
-            <button
-              onClick={handleBatchDelete}
-              className="px-3 py-1.5 bg-white border border-rose-300 text-rose-700 hover:bg-rose-50 rounded-lg font-medium flex items-center gap-1 shadow-xs"
-            >
-              <Trash2 className="w-3.5 h-3.5" />
-              <span>Delete</span>
-            </button>
+            {confirmBulkDelete ? (
+              <div className="flex items-center gap-2 px-2 py-1 bg-rose-50 border border-rose-300 rounded-lg text-rose-800">
+                <span>
+                  Delete {selectedTxs.length - selectedReconciledCount}?
+                  {selectedReconciledCount > 0 && ` (${selectedReconciledCount} reconciled will be skipped)`}
+                </span>
+                <button onClick={handleBatchDelete} className="px-2 py-0.5 bg-rose-600 text-white rounded font-semibold">
+                  Yes
+                </button>
+                <button onClick={() => setConfirmBulkDelete(false)} className="text-slate-600">
+                  No
+                </button>
+              </div>
+            ) : (
+              <button
+                onClick={() => setConfirmBulkDelete(true)}
+                disabled={selectedTxs.length > 0 && selectedReconciledCount === selectedTxs.length}
+                title={selectedReconciledCount === selectedTxs.length ? 'Reconciled transactions cannot be deleted' : undefined}
+                className="px-3 py-1.5 bg-white border border-rose-300 text-rose-700 hover:bg-rose-50 rounded-lg font-medium flex items-center gap-1 shadow-xs disabled:opacity-50"
+              >
+                <Trash2 className="w-3.5 h-3.5" />
+                <span>Delete</span>
+              </button>
+            )}
 
             <button
               onClick={() => setSelectedTxIds(new Set())}
@@ -384,7 +451,7 @@ export const TransactionsView: React.FC<TransactionsViewProps> = ({
                 <th className="py-3 px-3 w-64">Category & Tax Mapping</th>
                 <th className="py-3 px-3 w-32 text-right">Amount</th>
                 <th className="py-3 px-3 w-20 text-center">Reconciled</th>
-                <th className="py-3 px-3 w-12 text-center">Action</th>
+                <th className="py-3 px-3 w-20 text-center">Actions</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-100">
@@ -406,12 +473,13 @@ export const TransactionsView: React.FC<TransactionsViewProps> = ({
                   return (
                     <tr
                       key={tx.id}
-                      className={`hover:bg-slate-50/70 transition-colors ${
+                      onClick={() => onEditTransaction(tx)}
+                      className={`hover:bg-slate-50/70 transition-colors cursor-pointer ${
                         isSelected ? 'bg-teal-50/40' : ''
                       }`}
                     >
                       {/* Checkbox */}
-                      <td className="py-3 px-3 text-center">
+                      <td className="py-3 px-3 text-center" onClick={(e) => e.stopPropagation()}>
                         <input
                           type="checkbox"
                           checked={isSelected}
@@ -457,7 +525,7 @@ export const TransactionsView: React.FC<TransactionsViewProps> = ({
                       </td>
 
                       {/* Category Selector */}
-                      <td className="py-3 px-3">
+                      <td className="py-3 px-3" onClick={(e) => e.stopPropagation()}>
                         <div className="relative">
                           <select
                             value={tx.categoryId || ''}
@@ -525,9 +593,9 @@ export const TransactionsView: React.FC<TransactionsViewProps> = ({
                         {tx.reconciled ? (
                           <span
                             className="inline-flex items-center justify-center text-emerald-600"
-                            title="Reconciled with Bank Statement"
+                            title="Reconciled — date, amount and account are locked"
                           >
-                            <CheckCircle2 className="w-4 h-4" />
+                            <Lock className="w-3.5 h-3.5" />
                           </span>
                         ) : (
                           <span
@@ -538,18 +606,41 @@ export const TransactionsView: React.FC<TransactionsViewProps> = ({
                       </td>
 
                       {/* Actions */}
-                      <td className="py-3 px-3 text-center">
-                        <button
-                          onClick={() => {
-                            if (confirm('Delete this transaction?')) {
-                              deleteTransaction(tx.id);
-                            }
-                          }}
-                          className="p-1 text-slate-400 hover:text-rose-600 rounded transition-colors"
-                          title="Delete Transaction"
-                        >
-                          <Trash2 className="w-3.5 h-3.5" />
-                        </button>
+                      <td className="py-3 px-3 text-center whitespace-nowrap" onClick={(e) => e.stopPropagation()}>
+                        {confirmDeleteId === tx.id ? (
+                          <span className="inline-flex items-center gap-1.5 text-[11px]">
+                            <button
+                              onClick={() => {
+                                deleteTransaction(tx.id);
+                                setConfirmDeleteId(null);
+                              }}
+                              className="px-1.5 py-0.5 bg-rose-600 text-white rounded font-semibold"
+                            >
+                              Delete
+                            </button>
+                            <button onClick={() => setConfirmDeleteId(null)} className="text-slate-500">
+                              No
+                            </button>
+                          </span>
+                        ) : (
+                          <>
+                            <button
+                              onClick={() => onEditTransaction(tx)}
+                              className="p-1 text-slate-400 hover:text-teal-700 rounded transition-colors"
+                              title="Edit Transaction"
+                            >
+                              <Pencil className="w-3.5 h-3.5" />
+                            </button>
+                            <button
+                              onClick={() => setConfirmDeleteId(tx.id)}
+                              disabled={tx.reconciled}
+                              className="p-1 text-slate-400 hover:text-rose-600 rounded transition-colors disabled:opacity-30 disabled:hover:text-slate-400 disabled:cursor-not-allowed"
+                              title={tx.reconciled ? 'Reconciled transactions cannot be deleted' : 'Delete Transaction'}
+                            >
+                              <Trash2 className="w-3.5 h-3.5" />
+                            </button>
+                          </>
+                        )}
                       </td>
                     </tr>
                   );

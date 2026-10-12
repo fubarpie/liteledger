@@ -118,7 +118,11 @@ export const ImportCsvModal: React.FC<ImportCsvModalProps> = ({ isOpen, onClose 
   const handleImport = () => {
     if (parsedRows.length === 0) return;
 
-    const targetAccount = accountId || accounts[0]?.id;
+    const targetAccount = accounts.some((a) => a.id === accountId) ? accountId : accounts[0]?.id;
+    if (!targetAccount) {
+      setParseError('Add an account for this business first (Settings → Accounts), then import.');
+      return;
+    }
     const txsToInsert: Omit<Transaction, 'id'>[] = parsedRows.map((r) => ({
       businessId: activeBusiness.id,
       accountId: targetAccount,
@@ -126,7 +130,7 @@ export const ImportCsvModal: React.FC<ImportCsvModalProps> = ({ isOpen, onClose 
       payee: r.description,
       description: r.description,
       amount: r.amount,
-      categoryId: null, // Uncategorized, ready for AI!
+      categoryId: null, // Uncategorized; categorize manually or with AI afterwards
       reconciled: false,
       source: 'csv_import',
     }));

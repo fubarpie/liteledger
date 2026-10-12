@@ -13,6 +13,9 @@ import {
   AlertTriangle,
   FileCheck2,
   PieChart,
+  Plus,
+  Upload,
+  Circle,
 } from 'lucide-react';
 
 interface DashboardViewProps {
@@ -28,6 +31,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
     activeBusiness,
     accounts,
     transactions,
+    categories,
     reconciliations,
     bridgeConfig,
     syncSimpleFin,
@@ -62,12 +66,17 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
     t.date.startsWith(currentMonthPrefix)
   );
 
+  const categoryType = new Map(categories.map((c) => [c.id, c.type]));
+
   const monthRevenue = currentMonthTransactions
-    .filter((t) => t.amount > 0 && t.categoryId?.startsWith('inc_'))
+    .filter((t) => t.amount > 0 && t.categoryId && categoryType.get(t.categoryId) === 'income')
     .reduce((sum, t) => sum + t.amount, 0);
 
   const monthExpenses = currentMonthTransactions
-    .filter((t) => t.amount < 0 && (t.categoryId?.startsWith('exp_') || t.categoryId?.startsWith('cogs_')))
+    .filter((t) => {
+      const type = t.categoryId ? categoryType.get(t.categoryId) : undefined;
+      return t.amount < 0 && (type === 'expense' || type === 'cogs');
+    })
     .reduce((sum, t) => sum + Math.abs(t.amount), 0);
 
   const monthNetProfit = monthRevenue - monthExpenses;
@@ -75,12 +84,42 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
   const uncategorizedTransactions = transactions.filter((t) => !t.categoryId);
   const unreconciledTransactions = transactions.filter((t) => !t.reconciled);
 
+  const needsSetup = accounts.length === 0 || transactions.length === 0;
+  const isBankConnected = bridgeConfig.status === 'connected';
+  const setupSteps = [
+    {
+      done: accounts.length > 0,
+      title: 'Add a bank or card account',
+      detail: 'Record where your money lives. Add accounts in Settings.',
+      label: 'Add account',
+      icon: <Plus className="w-3.5 h-3.5" />,
+      onClick: () => onNavigateTab('settings'),
+    },
+    {
+      done: isBankConnected,
+      title: 'Connect a bank feed (optional)',
+      detail: 'Pull transactions automatically with SimpleFIN.',
+      label: 'Connect bank feed',
+      icon: <RefreshCw className="w-3.5 h-3.5" />,
+      onClick: () => onNavigateTab('bank-feeds'),
+    },
+    {
+      done: transactions.length > 0,
+      title: 'Add your first transactions',
+      detail: 'Enter one by hand, or import a CSV bank statement.',
+      label: 'Add transaction',
+      icon: <Upload className="w-3.5 h-3.5" />,
+      onClick: onOpenAddTransaction,
+    },
+  ];
+
   const formatCurrency = (val: number) => {
+    const safe = Number.isFinite(val) ? val : 0;
     return new Intl.NumberFormat('en-US', {
       style: 'currency',
       currency: activeBusiness.currency || 'USD',
       minimumFractionDigits: 2,
-    }).format(val);
+    }).format(safe);
   };
 
   return (
@@ -126,6 +165,40 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
           </button>
         </div>
       </div>
+
+      {/* Get started */}
+      {needsSetup && (
+        <div className="bg-white p-5 rounded-xl border border-indigo-200 shadow-xs">
+          <h2 className="text-sm font-bold text-slate-900">Get started with {activeBusiness.name}</h2>
+          <p className="text-xs text-slate-500 mt-0.5">A few quick steps to get your books going.</p>
+          <ul className="mt-4 space-y-3">
+            {setupSteps.map((step) => (
+              <li key={step.title} className="flex items-center justify-between gap-3">
+                <div className="flex items-start gap-2.5">
+                  {step.done ? (
+                    <CheckCircle className="w-4 h-4 text-emerald-600 mt-0.5 flex-shrink-0" />
+                  ) : (
+                    <Circle className="w-4 h-4 text-slate-300 mt-0.5 flex-shrink-0" />
+                  )}
+                  <div>
+                    <div className="text-xs font-medium text-slate-900">{step.title}</div>
+                    <div className="text-[11px] text-slate-500">{step.detail}</div>
+                  </div>
+                </div>
+                {!step.done && (
+                  <button
+                    onClick={step.onClick}
+                    className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-indigo-700 bg-indigo-50 hover:bg-indigo-100 border border-indigo-200 rounded-lg transition-colors flex-shrink-0"
+                  >
+                    {step.icon}
+                    <span>{step.label}</span>
+                  </button>
+                )}
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
 
       {/* Action Need Alerts */}
       {uncategorizedTransactions.length > 0 && (
@@ -253,6 +326,14 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
             </div>
 
             <div className="divide-y divide-slate-100">
+              {accounts.length === 0 && (
+                <div className="p-6 text-center text-xs text-slate-500">
+                  No accounts yet.{' '}
+                  <button onClick={() => onNavigateTab('settings')} className="text-teal-700 font-medium hover:underline">
+                    Add one in Settings
+                  </button>
+                </div>
+              )}
               {accounts.map((acc) => {
                 const isPositive = acc.currentBalance >= 0;
                 return (
@@ -333,6 +414,14 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
             </div>
 
             <div className="divide-y divide-slate-100">
+              {transactions.length === 0 && (
+                <div className="p-6 text-center text-xs text-slate-500">
+                  No transactions yet.{' '}
+                  <button onClick={onOpenAddTransaction} className="text-teal-700 font-medium hover:underline">
+                    Add your first one
+                  </button>
+                </div>
+              )}
               {transactions.slice(0, 6).map((tx) => {
                 const isIncome = tx.amount > 0;
                 return (
@@ -424,13 +513,19 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
               </div>
 
               <div className="flex items-start gap-2.5">
-                <CheckCircle className="w-4 h-4 text-emerald-600 mt-0.5 flex-shrink-0" />
+                {categories.length > 0 ? (
+                  <CheckCircle className="w-4 h-4 text-emerald-600 mt-0.5 flex-shrink-0" />
+                ) : (
+                  <AlertTriangle className="w-4 h-4 text-slate-400 mt-0.5 flex-shrink-0" />
+                )}
                 <div>
                   <div className="text-xs font-medium text-slate-900">
                     Schedule C Tax Alignment
                   </div>
                   <div className="text-[11px] text-slate-500">
-                    Chart of accounts mapped directly to IRS Schedule C lines.
+                    {categories.length > 0
+                      ? `${categories.length} categories in your chart of accounts.`
+                      : 'No categories yet. Add some in Settings.'}
                   </div>
                 </div>
               </div>

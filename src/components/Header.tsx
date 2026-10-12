@@ -10,8 +10,10 @@ import {
   AlertCircle,
   Briefcase,
   Layers,
+  LogOut,
+  Settings,
 } from 'lucide-react';
-import { Business } from '../types.ts';
+import { useAuth } from '../context/AuthContext.tsx';
 
 interface HeaderProps {
   activeTab: string;
@@ -38,7 +40,10 @@ export const Header: React.FC<HeaderProps> = ({
     isAiCategorizing,
   } = useAccounting();
 
+  const { user, logout } = useAuth();
+
   const [bizDropdownOpen, setBizDropdownOpen] = useState(false);
+  const [userMenuOpen, setUserMenuOpen] = useState(false);
 
   const uncategorizedCount = transactions.filter((t) => !t.categoryId).length;
 
@@ -165,11 +170,7 @@ export const Header: React.FC<HeaderProps> = ({
                 }`}
               />
               <span className="text-[11px] font-medium">
-                {bridgeConfig.status === 'connected'
-                  ? bridgeConfig.isDemo
-                    ? 'SimpleFIN (Sandbox)'
-                    : 'SimpleFIN Connected'
-                  : 'Bank Feed Disconnected'}
+                {bridgeConfig.status === 'connected' ? 'SimpleFIN Connected' : 'Bank Feed Disconnected'}
               </span>
               {bridgeConfig.status === 'connected' && (
                 <button
@@ -202,6 +203,65 @@ export const Header: React.FC<HeaderProps> = ({
                   {isAiCategorizing ? 'Categorizing...' : `AI Categorize (${uncategorizedCount})`}
                 </span>
               </button>
+            )}
+            {/* User menu */}
+            {user && (
+              <div className="relative">
+                <button
+                  onClick={() => setUserMenuOpen(!userMenuOpen)}
+                  className="flex items-center gap-2 pl-1 pr-2 py-1 rounded-lg border border-slate-200 hover:border-slate-300 bg-slate-50 hover:bg-slate-100 transition-colors"
+                  aria-haspopup="menu"
+                  aria-expanded={userMenuOpen}
+                  title="Account"
+                >
+                  <span className="w-7 h-7 rounded-full bg-teal-700 text-white text-xs font-bold flex items-center justify-center">
+                    {(user.name || user.email).charAt(0).toUpperCase()}
+                  </span>
+                  <span className="hidden sm:block max-w-[120px] truncate text-xs font-semibold text-slate-800">
+                    {user.name}
+                  </span>
+                  <ChevronDown className="w-3.5 h-3.5 text-slate-400" />
+                </button>
+
+                {userMenuOpen && (
+                  <>
+                    <div className="fixed inset-0 z-20" onClick={() => setUserMenuOpen(false)} />
+                    <div
+                      role="menu"
+                      className="absolute right-0 mt-1.5 w-60 bg-white rounded-xl shadow-lg border border-slate-200 py-1.5 z-30 divide-y divide-slate-100"
+                    >
+                      <div className="px-3.5 py-2">
+                        <div className="text-[11px] text-slate-400">Signed in as</div>
+                        <div className="text-xs font-semibold text-slate-900 truncate">{user.email}</div>
+                      </div>
+                      <div className="py-1">
+                        <button
+                          role="menuitem"
+                          onClick={() => {
+                            setUserMenuOpen(false);
+                            setActiveTab('settings');
+                          }}
+                          className="w-full flex items-center gap-2.5 px-3.5 py-2 text-xs text-slate-700 hover:bg-slate-50 transition-colors"
+                        >
+                          <Settings className="w-3.5 h-3.5 text-slate-400" />
+                          Account settings
+                        </button>
+                        <button
+                          role="menuitem"
+                          onClick={() => {
+                            setUserMenuOpen(false);
+                            logout().catch(() => {});
+                          }}
+                          className="w-full flex items-center gap-2.5 px-3.5 py-2 text-xs text-slate-700 hover:bg-slate-50 transition-colors"
+                        >
+                          <LogOut className="w-3.5 h-3.5 text-slate-400" />
+                          Sign out
+                        </button>
+                      </div>
+                    </div>
+                  </>
+                )}
+              </div>
             )}
           </div>
         </div>
