@@ -73,13 +73,13 @@ interface AccountingContextType {
 const AccountingContext = createContext<AccountingContextType | undefined>(undefined);
 
 const STORAGE_KEYS = {
-  BUSINESSES: 'kitebooks_businesses_v1',
-  ACTIVE_BIZ: 'kitebooks_active_biz_v1',
-  ACCOUNTS: 'kitebooks_accounts_v1',
-  CATEGORIES: 'kitebooks_categories_v1',
-  TRANSACTIONS: 'kitebooks_transactions_v1',
-  RECONCILIATIONS: 'kitebooks_reconciliations_v1',
-  BRIDGE_CONFIGS: 'kitebooks_bridge_configs_v1',
+  BUSINESSES: 'liteledger_businesses_v1',
+  ACTIVE_BIZ: 'liteledger_active_biz_v1',
+  ACCOUNTS: 'liteledger_accounts_v1',
+  CATEGORIES: 'liteledger_categories_v1',
+  TRANSACTIONS: 'liteledger_transactions_v1',
+  RECONCILIATIONS: 'liteledger_reconciliations_v1',
+  BRIDGE_CONFIGS: 'liteledger_bridge_configs_v1',
 };
 
 export const AccountingProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {

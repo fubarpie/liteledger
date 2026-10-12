@@ -126,13 +126,13 @@ export const SettingsView: React.FC<SettingsViewProps> = ({ onOpenAddBusiness })
     const backupData = {
       version: '1.0',
       exportedAt: new Date().toISOString(),
-      kitebooks: {
-        businesses: JSON.parse(localStorage.getItem('kitebooks_businesses_v1') || '[]'),
-        accounts: JSON.parse(localStorage.getItem('kitebooks_accounts_v1') || '[]'),
-        categories: JSON.parse(localStorage.getItem('kitebooks_categories_v1') || '[]'),
-        transactions: JSON.parse(localStorage.getItem('kitebooks_transactions_v1') || '[]'),
-        reconciliations: JSON.parse(localStorage.getItem('kitebooks_reconciliations_v1') || '[]'),
-        bridgeConfigs: JSON.parse(localStorage.getItem('kitebooks_bridge_configs_v1') || '{}'),
+      liteledger: {
+        businesses: JSON.parse(localStorage.getItem('liteledger_businesses_v1') || '[]'),
+        accounts: JSON.parse(localStorage.getItem('liteledger_accounts_v1') || '[]'),
+        categories: JSON.parse(localStorage.getItem('liteledger_categories_v1') || '[]'),
+        transactions: JSON.parse(localStorage.getItem('liteledger_transactions_v1') || '[]'),
+        reconciliations: JSON.parse(localStorage.getItem('liteledger_reconciliations_v1') || '[]'),
+        bridgeConfigs: JSON.parse(localStorage.getItem('liteledger_bridge_configs_v1') || '{}'),
       },
     };
 
@@ -142,7 +142,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({ onOpenAddBusiness })
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
-    a.download = `KiteBooks_Backup_${new Date().toISOString().split('T')[0]}.json`;
+    a.download = `LiteLedger_Backup_${new Date().toISOString().split('T')[0]}.json`;
     a.click();
     URL.revokeObjectURL(url);
   };
