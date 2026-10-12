@@ -195,7 +195,7 @@ export const Header: React.FC<HeaderProps> = ({
                 }}
                 disabled={isAiCategorizing}
                 className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-teal-600 hover:bg-teal-700 text-white text-xs font-medium shadow-xs transition-colors disabled:opacity-50"
-                title="Use Gemini AI to categorize all pending transactions"
+                title="Use AI to categorize all pending transactions"
               >
                 <Sparkles className={`w-3.5 h-3.5 ${isAiCategorizing ? 'animate-spin' : ''}`} />
                 <span>

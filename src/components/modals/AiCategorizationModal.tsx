@@ -31,7 +31,7 @@ export const AiCategorizationModal: React.FC<AiCategorizationModalProps> = ({
                 AI Categorization Results
               </h2>
               <p className="text-xs text-slate-500">
-                Gemini classified transactions for {activeBusiness.name}
+                AI classified transactions for {activeBusiness.name}
               </p>
             </div>
           </div>

@@ -163,7 +163,7 @@ export const TransactionsView: React.FC<TransactionsViewProps> = ({
             </span>
           </div>
           <p className="text-xs text-slate-500 mt-0.5">
-            View, manually categorize, or use Gemini AI to auto-classify bank and card transactions.
+            View, manually categorize, or use AI to auto-classify bank and card transactions.
           </p>
         </div>
 
@@ -194,7 +194,7 @@ export const TransactionsView: React.FC<TransactionsViewProps> = ({
             }}
             disabled={isAiCategorizing || uncategorizedCount === 0}
             className="flex items-center gap-1.5 px-3.5 py-1.5 text-xs font-semibold text-white bg-teal-600 hover:bg-teal-700 rounded-lg shadow-xs transition-colors disabled:opacity-50"
-            title="Automatically categorize uncategorized transactions with Gemini"
+            title="Automatically categorize uncategorized transactions with AI"
           >
             <Sparkles className={`w-3.5 h-3.5 ${isAiCategorizing ? 'animate-spin' : ''}`} />
             <span>

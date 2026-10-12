@@ -1,12 +1,16 @@
 services:
   liteledger:
+    # Pre-built image published by GitHub Actions. To build locally instead:
+    #   docker compose up -d --build
+    image: ghcr.io/fubarpie/liteledger:latest
     build: .
-    image: liteledger:latest
     container_name: liteledger
     restart: unless-stopped
     ports:
       - "${PORT:-3000}:3000"
     environment:
       PORT: 3000
-      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
-      GEMINI_MODEL: ${GEMINI_MODEL:-gemini-3.8-flash}
+      OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
+      OPENROUTER_MODEL: ${OPENROUTER_MODEL:-google/gemini-2.5-flash}
+      OPENROUTER_BASE_URL: ${OPENROUTER_BASE_URL:-https://openrouter.ai/api/v1}
+      AI_REQUIRE_KEY: ${AI_REQUIRE_KEY:-true}
