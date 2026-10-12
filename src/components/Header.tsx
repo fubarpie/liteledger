@@ -65,7 +65,7 @@ export const Header: React.FC<HeaderProps> = ({
               </div>
               <div>
                 <span className="text-lg font-bold tracking-tight text-slate-900 block leading-tight">
-                  KiteBooks
+                  LiteLedger
                 </span>
                 <span className="text-[11px] font-medium text-slate-500 tracking-wide uppercase">
                   Small Business Edition

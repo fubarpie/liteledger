@@ -14,14 +14,20 @@ const port = parseInt(process.env.PORT || "3000", 10);
 
 app.use(express.json({ limit: "10mb" }));
 
-// Initialize Gemini Client
-const ai = new GoogleGenAI({
-  apiKey: process.env.GEMINI_API_KEY,
-  httpOptions: {
-    headers: {
-      "User-Agent": "aistudio-build",
-    },
-  },
+// Initialize Gemini Client lazily so the app runs without an API key
+// (AI categorization is simply disabled until GEMINI_API_KEY is set).
+const GEMINI_MODEL = process.env.GEMINI_MODEL || "gemini-3.8-flash";
+let aiClient: GoogleGenAI | null = null;
+function getAI(): GoogleGenAI | null {
+  if (!process.env.GEMINI_API_KEY) return null;
+  if (!aiClient) {
+    aiClient = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
+  }
+  return aiClient;
+}
+
+app.get("/api/health", (_req, res) => {
+  res.json({ status: "ok", ai: Boolean(process.env.GEMINI_API_KEY) });
 });
 
 // ==========================================
@@ -69,7 +75,7 @@ app.post("/api/simplefin/claim", async (req, res) => {
       method: "POST",
       headers: {
         "Content-Length": "0",
-        "User-Agent": "KiteBooks/1.0",
+        "User-Agent": "LiteLedger/1.0",
       },
     });
 
@@ -129,7 +135,7 @@ app.post("/api/simplefin/sync", async (req, res) => {
     const targetUrl = `${cleanUrl}?${params.toString()}`;
 
     const headers: Record<string, string> = {
-      "User-Agent": "KiteBooks/1.0",
+      "User-Agent": "LiteLedger/1.0",
       Accept: "application/json",
     };
 
@@ -289,6 +295,10 @@ function generateMockSimpleFinData() {
 
 app.post("/api/ai/categorize", async (req, res) => {
   try {
+    const ai = getAI();
+    if (!ai) {
+      return res.status(503).json({ error: "AI categorization is disabled: GEMINI_API_KEY is not set on the server." });
+    }
     const { transactions, categories, businessType } = req.body;
 
     if (!Array.isArray(transactions) || transactions.length === 0) {
@@ -351,7 +361,7 @@ ${JSON.stringify(simplifiedTx, null, 2)}
 `;
 
     const response = await ai.models.generateContent({
-      model: "gemini-3.8-flash",
+      model: GEMINI_MODEL,
       contents: prompt,
       config: {
         responseMimeType: "application/json",
@@ -403,7 +413,7 @@ async function startServer() {
   }
 
   app.listen(port, "0.0.0.0", () => {
-    console.log(`KiteBooks server running on http://0.0.0.0:${port}`);
+    console.log(`LiteLedger server running on http://0.0.0.0:${port}`);
   });
 }
 

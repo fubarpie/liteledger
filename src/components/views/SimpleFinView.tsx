@@ -276,7 +276,7 @@ export const SimpleFinView: React.FC<SimpleFinViewProps> = ({ onOpenImportCsv })
             <ShieldCheck className="w-4 h-4 text-emerald-600 flex-shrink-0 mt-0.5" />
             <div>
               <span className="font-semibold text-slate-800">Direct & Private:</span>{' '}
-              KiteBooks uses SimpleFIN's read-only protocol. We only retrieve transaction history
+              LiteLedger uses SimpleFIN's read-only protocol. We only retrieve transaction history
               and balances necessary for bookkeeping. No third-party data broker advertising.
             </div>
           </div>

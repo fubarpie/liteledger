@@ -66,7 +66,7 @@ function MainApp() {
       <footer className="border-t border-slate-200 bg-white py-4 mt-auto">
         <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 flex flex-col sm:flex-row items-center justify-between text-xs text-slate-500 gap-2">
           <div>
-            <span className="font-semibold text-slate-700">KiteBooks</span> · Multi-Entity Small
+            <span className="font-semibold text-slate-700">LiteLedger</span> · Multi-Entity Small
             Business Accounting & SimpleFIN Bank Feeds
           </div>
           <div className="flex items-center gap-4 text-[11px] text-slate-400">

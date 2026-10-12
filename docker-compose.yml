@@ -1,0 +1,12 @@
+services:
+  liteledger:
+    build: .
+    image: liteledger:latest
+    container_name: liteledger
+    restart: unless-stopped
+    ports:
+      - "${PORT:-3000}:3000"
+    environment:
+      PORT: 3000
+      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+      GEMINI_MODEL: ${GEMINI_MODEL:-gemini-3.8-flash}
