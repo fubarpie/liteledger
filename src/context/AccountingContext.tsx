@@ -1,4 +1,4 @@
-import React, { createContext, useContext, useState, useEffect, useMemo, useCallback } from 'react';
+import React, { createContext, useContext, useState, useEffect, useMemo, useCallback, useRef } from 'react';
 import {
   Business,
   Account,
@@ -7,22 +7,38 @@ import {
   Reconciliation,
   SimpleFinBridgeConfig,
 } from '../types.ts';
-import {
-  DEFAULT_CATEGORIES,
-  INITIAL_BUSINESSES,
-  INITIAL_ACCOUNTS,
-  INITIAL_TRANSACTIONS,
-  INITIAL_RECONCILIATIONS,
-  INITIAL_BRIDGE_CONFIGS,
-} from '../data/initialData.ts';
+import { api, apiGet, apiPost, apiPatch, apiPut, apiDelete, newClientId } from '../api.ts';
+
+export interface Notice {
+  kind: 'error' | 'success' | 'info';
+  message: string;
+}
+
+export interface NewBusinessOptions {
+  /** 'schedule-c' (default) seeds the standard IRS Schedule C chart of accounts; 'none' starts empty. */
+  categoryTemplate?: 'schedule-c' | 'none';
+  /** Bank / card accounts to create alongside the business. */
+  accounts?: Array<Omit<Account, 'id' | 'businessId'>>;
+}
 
 interface AccountingContextType {
+  /** true until the first server load finishes */
+  loading: boolean;
+  loadError: string | null;
+  /** Re-fetch everything from the server (use after server-side bulk operations). */
+  reload: () => Promise<void>;
+  /** Transient toast-style message (errors from background saves land here). */
+  notice: Notice | null;
+  notify: (message: string, kind?: Notice['kind']) => void;
+  dismissNotice: () => void;
+
   // Business
   businesses: Business[];
   activeBusinessId: string;
+  /** Undefined only while there are no businesses yet (onboarding). */
   activeBusiness: Business;
   setActiveBusinessId: (id: string) => void;
-  addBusiness: (biz: Omit<Business, 'id' | 'createdDate'>) => Business;
+  addBusiness: (biz: Omit<Business, 'id' | 'createdDate'>, options?: NewBusinessOptions) => Promise<Business>;
   updateBusiness: (id: string, updates: Partial<Business>) => void;
   deleteBusiness: (id: string) => void;
 
@@ -33,16 +49,18 @@ interface AccountingContextType {
   updateAccount: (id: string, updates: Partial<Account>) => void;
   deleteAccount: (id: string) => void;
 
-  // Categories
+  // Categories (per business)
   categories: Category[];
-  addCategory: (cat: Omit<Category, 'id'>) => Category;
+  addCategory: (cat: Omit<Category, 'id' | 'businessId'>) => Category;
   updateCategory: (id: string, updates: Partial<Category>) => void;
+  deleteCategory: (id: string) => void;
 
   // Transactions
   transactions: Transaction[];
   allTransactions: Transaction[];
   addTransaction: (tx: Omit<Transaction, 'id'>) => Transaction;
   addBatchTransactions: (txs: Omit<Transaction, 'id'>[]) => void;
+  /** Edit any field of an existing transaction. Reconciled transactions only accept category/notes/payee/description edits. */
   updateTransaction: (id: string, updates: Partial<Transaction>) => void;
   deleteTransaction: (id: string) => void;
   categorizeTransaction: (id: string, categoryId: string | null) => void;
@@ -57,399 +75,395 @@ interface AccountingContextType {
   saveReconciliation: (rec: Reconciliation) => void;
   deleteReconciliation: (id: string) => void;
 
-  // SimpleFIN
+  // SimpleFIN (credentials are stored encrypted on the server and never sent to the browser)
   bridgeConfig: SimpleFinBridgeConfig;
   connectSimpleFinWithToken: (setupToken: string) => Promise<{ success: boolean; error?: string }>;
-  connectSimpleFinAccessUrl: (accessUrl: string, isDemo?: boolean) => void;
+  connectSimpleFinAccessUrl: (accessUrl: string) => Promise<{ success: boolean; error?: string }>;
   disconnectSimpleFin: () => void;
   syncSimpleFin: () => Promise<{ addedCount: number; message: string }>;
   isSyncing: boolean;
   syncError: string | null;
-
-  // Utility
-  resetAllToDefaults: () => void;
 }
 
 const AccountingContext = createContext<AccountingContextType | undefined>(undefined);
 
-const STORAGE_KEYS = {
-  BUSINESSES: 'liteledger_businesses_v1',
-  ACTIVE_BIZ: 'liteledger_active_biz_v1',
-  ACCOUNTS: 'liteledger_accounts_v1',
-  CATEGORIES: 'liteledger_categories_v1',
-  TRANSACTIONS: 'liteledger_transactions_v1',
-  RECONCILIATIONS: 'liteledger_reconciliations_v1',
-  BRIDGE_CONFIGS: 'liteledger_bridge_configs_v1',
-};
+const ACTIVE_BIZ_KEY = 'liteledger_active_biz'; // UI preference only; all data lives on the server
+const round2 = (n: number) => Math.round(n * 100) / 100;
 
 export const AccountingProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
-  // 1. Businesses
-  const [businesses, setBusinesses] = useState<Business[]>(() => {
-    try {
-      const saved = localStorage.getItem(STORAGE_KEYS.BUSINESSES);
-      return saved ? JSON.parse(saved) : INITIAL_BUSINESSES;
-    } catch {
-      return INITIAL_BUSINESSES;
-    }
-  });
+  const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [notice, setNotice] = useState<Notice | null>(null);
 
+  const [businesses, setBusinesses] = useState<Business[]>([]);
   const [activeBusinessId, setActiveBusinessIdState] = useState<string>(() => {
     try {
-      const saved = localStorage.getItem(STORAGE_KEYS.ACTIVE_BIZ);
-      if (saved && businesses.some((b) => b.id === saved)) return saved;
-      return businesses[0]?.id || 'biz_woodworks';
+      return localStorage.getItem(ACTIVE_BIZ_KEY) || '';
     } catch {
-      return 'biz_woodworks';
+      return '';
     }
   });
-
-  // 2. Accounts
-  const [allAccounts, setAllAccounts] = useState<Account[]>(() => {
-    try {
-      const saved = localStorage.getItem(STORAGE_KEYS.ACCOUNTS);
-      return saved ? JSON.parse(saved) : INITIAL_ACCOUNTS;
-    } catch {
-      return INITIAL_ACCOUNTS;
-    }
-  });
-
-  // 3. Categories
-  const [categories, setCategories] = useState<Category[]>(() => {
-    try {
-      const saved = localStorage.getItem(STORAGE_KEYS.CATEGORIES);
-      return saved ? JSON.parse(saved) : DEFAULT_CATEGORIES;
-    } catch {
-      return DEFAULT_CATEGORIES;
-    }
-  });
-
-  // 4. Transactions
-  const [allTransactions, setAllTransactions] = useState<Transaction[]>(() => {
-    try {
-      const saved = localStorage.getItem(STORAGE_KEYS.TRANSACTIONS);
-      return saved ? JSON.parse(saved) : INITIAL_TRANSACTIONS;
-    } catch {
-      return INITIAL_TRANSACTIONS;
-    }
-  });
-
-  // 5. Reconciliations
-  const [allReconciliations, setAllReconciliations] = useState<Reconciliation[]>(() => {
-    try {
-      const saved = localStorage.getItem(STORAGE_KEYS.RECONCILIATIONS);
-      return saved ? JSON.parse(saved) : INITIAL_RECONCILIATIONS;
-    } catch {
-      return INITIAL_RECONCILIATIONS;
-    }
-  });
-
-  // 6. SimpleFIN Bridge Configs
-  const [bridgeConfigs, setBridgeConfigs] = useState<Record<string, SimpleFinBridgeConfig>>(() => {
-    try {
-      const saved = localStorage.getItem(STORAGE_KEYS.BRIDGE_CONFIGS);
-      return saved ? JSON.parse(saved) : INITIAL_BRIDGE_CONFIGS;
-    } catch {
-      return INITIAL_BRIDGE_CONFIGS;
-    }
-  });
+  const [allAccounts, setAllAccounts] = useState<Account[]>([]);
+  const [allCategories, setAllCategories] = useState<Category[]>([]);
+  const [allTransactions, setAllTransactions] = useState<Transaction[]>([]);
+  const [allReconciliations, setAllReconciliations] = useState<Reconciliation[]>([]);
+  const [bridgeConfigs, setBridgeConfigs] = useState<Record<string, SimpleFinBridgeConfig>>({});
 
   const [isAiCategorizing, setIsAiCategorizing] = useState(false);
   const [isSyncing, setIsSyncing] = useState(false);
   const [syncError, setSyncError] = useState<string | null>(null);
 
-  // Sync to LocalStorage
-  useEffect(() => {
-    localStorage.setItem(STORAGE_KEYS.BUSINESSES, JSON.stringify(businesses));
-  }, [businesses]);
+  const notify = useCallback((message: string, kind: Notice['kind'] = 'info') => setNotice({ kind, message }), []);
+  const dismissNotice = useCallback(() => setNotice(null), []);
+
+  // ---- server load -------------------------------------------------------
+  const applyState = useCallback((s: any) => {
+    setBusinesses(s.businesses || []);
+    setAllAccounts(s.accounts || []);
+    setAllCategories(s.categories || []);
+    setAllTransactions(s.transactions || []);
+    setAllReconciliations(s.reconciliations || []);
+    setBridgeConfigs(s.bridgeConfigs || {});
+    setActiveBusinessIdState((cur) =>
+      (s.businesses || []).some((b: Business) => b.id === cur) ? cur : s.businesses?.[0]?.id || ''
+    );
+  }, []);
+
+  const reload = useCallback(async () => {
+    try {
+      applyState(await apiGet('/api/bootstrap'));
+      setLoadError(null);
+    } catch (e: any) {
+      setLoadError(e.message || 'Could not load your data');
+    } finally {
+      setLoading(false);
+    }
+  }, [applyState]);
+
+  const reloadRef = useRef(reload);
+  reloadRef.current = reload;
 
   useEffect(() => {
-    localStorage.setItem(STORAGE_KEYS.ACTIVE_BIZ, activeBusinessId);
+    reload();
+  }, [reload]);
+
+  useEffect(() => {
+    try {
+      if (activeBusinessId) localStorage.setItem(ACTIVE_BIZ_KEY, activeBusinessId);
+    } catch {
+      /* ignore */
+    }
   }, [activeBusinessId]);
 
-  useEffect(() => {
-    localStorage.setItem(STORAGE_KEYS.ACCOUNTS, JSON.stringify(allAccounts));
-  }, [allAccounts]);
+  // ---- background write queue ---------------------------------------------
+  // The UI updates immediately; server writes run one at a time, in order. If one fails the user is told and
+  // the screen is re-synced from the server so it never shows data that wasn't saved.
+  const queue = useRef<Promise<unknown>>(Promise.resolve());
+  const persist = useCallback((label: string, fn: () => Promise<unknown>) => {
+    const p = queue.current.then(fn).catch(async (e: any) => {
+      if (e?.status !== 401) setNotice({ kind: 'error', message: `${label}: ${e?.message || 'save failed'}` });
+      await reloadRef.current();
+    });
+    queue.current = p;
+    return p;
+  }, []);
 
-  useEffect(() => {
-    localStorage.setItem(STORAGE_KEYS.CATEGORIES, JSON.stringify(categories));
-  }, [categories]);
+  // ---- derived -------------------------------------------------------------
+  const activeBusiness = useMemo(
+    () => (businesses.find((b) => b.id === activeBusinessId) || businesses[0]) as Business,
+    [businesses, activeBusinessId]
+  );
+  const currentId = activeBusiness?.id || '';
 
-  useEffect(() => {
-    localStorage.setItem(STORAGE_KEYS.TRANSACTIONS, JSON.stringify(allTransactions));
-  }, [allTransactions]);
-
-  useEffect(() => {
-    localStorage.setItem(STORAGE_KEYS.RECONCILIATIONS, JSON.stringify(allReconciliations));
-  }, [allReconciliations]);
-
-  useEffect(() => {
-    localStorage.setItem(STORAGE_KEYS.BRIDGE_CONFIGS, JSON.stringify(bridgeConfigs));
-  }, [bridgeConfigs]);
-
-  // Derived active objects
-  const activeBusiness = useMemo(() => {
-    return businesses.find((b) => b.id === activeBusinessId) || businesses[0] || INITIAL_BUSINESSES[0];
-  }, [businesses, activeBusinessId]);
-
-  const accounts = useMemo(() => {
-    return allAccounts.filter((a) => a.businessId === activeBusinessId);
-  }, [allAccounts, activeBusinessId]);
-
-  const transactions = useMemo(() => {
-    return allTransactions
-      .filter((t) => t.businessId === activeBusinessId)
-      .sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
-  }, [allTransactions, activeBusinessId]);
-
-  const reconciliations = useMemo(() => {
-    return allReconciliations
-      .filter((r) => r.businessId === activeBusinessId)
-      .sort((a, b) => new Date(b.statementDate).getTime() - new Date(a.statementDate).getTime());
-  }, [allReconciliations, activeBusinessId]);
-
-  const bridgeConfig = useMemo<SimpleFinBridgeConfig>(() => {
-    return (
-      bridgeConfigs[activeBusinessId] || {
-        businessId: activeBusinessId,
+  const accounts = useMemo(() => allAccounts.filter((a) => a.businessId === currentId), [allAccounts, currentId]);
+  const categories = useMemo(() => allCategories.filter((c) => c.businessId === currentId), [allCategories, currentId]);
+  const transactions = useMemo(
+    () =>
+      allTransactions
+        .filter((t) => t.businessId === currentId)
+        .sort((a, b) => (a.date === b.date ? 0 : a.date < b.date ? 1 : -1)),
+    [allTransactions, currentId]
+  );
+  const reconciliations = useMemo(
+    () =>
+      allReconciliations
+        .filter((r) => r.businessId === currentId)
+        .sort((a, b) => (a.statementDate < b.statementDate ? 1 : -1)),
+    [allReconciliations, currentId]
+  );
+  const bridgeConfig = useMemo<SimpleFinBridgeConfig>(
+    () =>
+      bridgeConfigs[currentId] || {
+        businessId: currentId,
         accessUrl: '',
         isDemo: false,
         lastSyncedAt: null,
         status: 'disconnected',
-      }
-    );
-  }, [bridgeConfigs, activeBusinessId]);
+      },
+    [bridgeConfigs, currentId]
+  );
 
-  // Switch Active Business
   const setActiveBusinessId = useCallback((id: string) => {
     setActiveBusinessIdState(id);
     setSyncError(null);
   }, []);
 
-  // Business CRUD
-  const addBusiness = useCallback(
-    (bizData: Omit<Business, 'id' | 'createdDate'>) => {
-      const newId = `biz_${Date.now()}`;
-      const newBiz: Business = {
-        ...bizData,
-        id: newId,
-        createdDate: new Date().toISOString().split('T')[0],
-      };
-      setBusinesses((prev) => [...prev, newBiz]);
-      setActiveBusinessIdState(newId);
+  // ---- helpers -------------------------------------------------------------
+  const bumpBalance = useCallback((accountId: string, delta: number) => {
+    if (!delta) return;
+    setAllAccounts((prev) =>
+      prev.map((a) => (a.id === accountId ? { ...a, currentBalance: round2(a.currentBalance + delta) } : a))
+    );
+  }, []);
 
-      // Create default checking account for the new business
-      const defaultAccount: Account = {
-        id: `act_${Date.now()}_chk`,
-        businessId: newId,
-        name: 'Operating Checking',
-        type: 'checking',
-        institution: 'Primary Bank',
-        accountNumberLast4: '1001',
-        currentBalance: 0,
-        availableBalance: 0,
+  const withCategory = useCallback(
+    (t: Transaction, categoryId: string | null): Transaction => {
+      const cat = allCategories.find((c) => c.id === categoryId);
+      return {
+        ...t,
+        categoryId,
+        categoryName: cat?.name,
+        scheduleCLine: cat?.scheduleCLine,
       };
-      setAllAccounts((prev) => [...prev, defaultAccount]);
-      return newBiz;
+    },
+    [allCategories]
+  );
+
+  // ---- businesses -----------------------------------------------------------
+  const addBusiness = useCallback(
+    async (bizData: Omit<Business, 'id' | 'createdDate'>, options: NewBusinessOptions = {}) => {
+      // Wait for pending writes so ordering stays sane, then let the server seed categories/accounts.
+      await queue.current;
+      const state = await apiPost('/api/businesses', {
+        ...bizData,
+        categoryTemplate: options.categoryTemplate ?? 'schedule-c',
+        accounts: options.accounts ?? [],
+      });
+      const created: Business = state.businesses[0];
+      setBusinesses((prev) => [...prev, created]);
+      setAllAccounts((prev) => [...prev, ...state.accounts]);
+      setAllCategories((prev) => [...prev, ...state.categories]);
+      setBridgeConfigs((prev) => ({ ...prev, ...state.bridgeConfigs }));
+      setActiveBusinessIdState(created.id);
+      return created;
     },
     []
   );
 
-  const updateBusiness = useCallback((id: string, updates: Partial<Business>) => {
-    setBusinesses((prev) =>
-      prev.map((b) => (b.id === id ? { ...b, ...updates } : b))
-    );
-  }, []);
+  const updateBusiness = useCallback(
+    (id: string, updates: Partial<Business>) => {
+      setBusinesses((prev) => prev.map((b) => (b.id === id ? { ...b, ...updates } : b)));
+      const { id: _i, createdDate: _c, ...body } = updates as any;
+      persist('Could not save business', () => apiPatch(`/api/businesses/${id}`, body));
+    },
+    [persist]
+  );
 
   const deleteBusiness = useCallback(
     (id: string) => {
       if (businesses.length <= 1) {
-        alert('You must have at least one business in your software.');
+        notify('You must keep at least one business.', 'error');
         return;
       }
       setBusinesses((prev) => prev.filter((b) => b.id !== id));
       setAllAccounts((prev) => prev.filter((a) => a.businessId !== id));
+      setAllCategories((prev) => prev.filter((c) => c.businessId !== id));
       setAllTransactions((prev) => prev.filter((t) => t.businessId !== id));
       setAllReconciliations((prev) => prev.filter((r) => r.businessId !== id));
-      const nextBiz = businesses.find((b) => b.id !== id);
-      if (nextBiz) setActiveBusinessIdState(nextBiz.id);
+      const next = businesses.find((b) => b.id !== id);
+      if (next && activeBusinessId === id) setActiveBusinessIdState(next.id);
+      persist('Could not delete business', () => apiDelete(`/api/businesses/${id}`));
     },
-    [businesses]
+    [businesses, activeBusinessId, persist, notify]
   );
 
-  // Accounts CRUD
-  const addAccount = useCallback((accountData: Omit<Account, 'id'>) => {
-    const newAccount: Account = {
-      ...accountData,
-      id: `act_${Date.now()}`,
-    };
-    setAllAccounts((prev) => [...prev, newAccount]);
-    return newAccount;
-  }, []);
-
-  const updateAccount = useCallback((id: string, updates: Partial<Account>) => {
-    setAllAccounts((prev) =>
-      prev.map((a) => (a.id === id ? { ...a, ...updates } : a))
-    );
-  }, []);
-
-  const deleteAccount = useCallback((id: string) => {
-    setAllAccounts((prev) => prev.filter((a) => a.id !== id));
-  }, []);
-
-  // Categories CRUD
-  const addCategory = useCallback((catData: Omit<Category, 'id'>) => {
-    const newCat: Category = {
-      ...catData,
-      id: `cat_${Date.now()}`,
-    };
-    setCategories((prev) => [...prev, newCat]);
-    return newCat;
-  }, []);
-
-  const updateCategory = useCallback((id: string, updates: Partial<Category>) => {
-    setCategories((prev) =>
-      prev.map((c) => (c.id === id ? { ...c, ...updates } : c))
-    );
-  }, []);
-
-  // Transactions CRUD
-  const addTransaction = useCallback((txData: Omit<Transaction, 'id'>) => {
-    const newTx: Transaction = {
-      ...txData,
-      id: `tx_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
-    };
-    setAllTransactions((prev) => [newTx, ...prev]);
-
-    // Update account balance
-    setAllAccounts((prev) =>
-      prev.map((act) => {
-        if (act.id === txData.accountId) {
-          return {
-            ...act,
-            currentBalance: Number((act.currentBalance + txData.amount).toFixed(2)),
-          };
-        }
-        return act;
-      })
-    );
-
-    return newTx;
-  }, []);
-
-  const addBatchTransactions = useCallback(
-    (txsData: Omit<Transaction, 'id'>[]) => {
-      const newTxs: Transaction[] = txsData.map((t, idx) => ({
-        ...t,
-        id: `tx_${Date.now()}_${idx}_${Math.random().toString(36).substring(2, 6)}`,
-      }));
-
-      setAllTransactions((prev) => [...newTxs, ...prev]);
-
-      // Adjust account balances
-      const balanceDeltas: Record<string, number> = {};
-      newTxs.forEach((t) => {
-        balanceDeltas[t.accountId] = (balanceDeltas[t.accountId] || 0) + t.amount;
-      });
-
-      setAllAccounts((prev) =>
-        prev.map((act) => {
-          if (balanceDeltas[act.id]) {
-            return {
-              ...act,
-              currentBalance: Number((act.currentBalance + balanceDeltas[act.id]).toFixed(2)),
-            };
-          }
-          return act;
-        })
-      );
+  // ---- accounts --------------------------------------------------------------
+  const addAccount = useCallback(
+    (data: Omit<Account, 'id'>) => {
+      const acc: Account = { ...data, id: newClientId('act') };
+      setAllAccounts((prev) => [...prev, acc]);
+      persist('Could not save account', () => apiPost('/api/accounts', acc));
+      return acc;
     },
-    []
+    [persist]
   );
 
-  const updateTransaction = useCallback((id: string, updates: Partial<Transaction>) => {
-    setAllTransactions((prev) =>
-      prev.map((t) => (t.id === id ? { ...t, ...updates } : t))
-    );
-  }, []);
+  const updateAccount = useCallback(
+    (id: string, updates: Partial<Account>) => {
+      setAllAccounts((prev) => prev.map((a) => (a.id === id ? { ...a, ...updates } : a)));
+      const { id: _i, businessId: _b, simplefinAccountId: _s, lastSyncedAt: _l, ...body } = updates as any;
+      persist('Could not save account', () => apiPatch(`/api/accounts/${id}`, body));
+    },
+    [persist]
+  );
 
-  const deleteTransaction = useCallback((id: string) => {
-    setAllTransactions((prev) => prev.filter((t) => t.id !== id));
-  }, []);
+  const deleteAccount = useCallback(
+    (id: string) => {
+      setAllAccounts((prev) => prev.filter((a) => a.id !== id));
+      setAllTransactions((prev) => prev.filter((t) => t.accountId !== id));
+      persist('Could not delete account', () => apiDelete(`/api/accounts/${id}`));
+    },
+    [persist]
+  );
 
-  const categorizeTransaction = useCallback(
-    (id: string, categoryId: string | null) => {
-      const cat = categories.find((c) => c.id === categoryId);
+  // ---- categories ------------------------------------------------------------
+  const addCategory = useCallback(
+    (data: Omit<Category, 'id' | 'businessId'>) => {
+      const cat: Category = { ...data, id: newClientId('cat'), businessId: currentId };
+      setAllCategories((prev) => [...prev, cat]);
+      persist('Could not save category', () => apiPost('/api/categories', cat));
+      return cat;
+    },
+    [currentId, persist]
+  );
+
+  const updateCategory = useCallback(
+    (id: string, updates: Partial<Category>) => {
+      setAllCategories((prev) => prev.map((c) => (c.id === id ? { ...c, ...updates } : c)));
+      // keep denormalized names on transactions fresh
       setAllTransactions((prev) =>
         prev.map((t) =>
-          t.id === id
+          t.categoryId === id
             ? {
                 ...t,
-                categoryId,
-                categoryName: cat?.name || undefined,
-                scheduleCLine: cat?.scheduleCLine || undefined,
+                categoryName: updates.name ?? t.categoryName,
+                scheduleCLine: updates.scheduleCLine ?? t.scheduleCLine,
               }
             : t
         )
       );
+      const { id: _i, businessId: _b, ...body } = updates as any;
+      persist('Could not save category', () => apiPatch(`/api/categories/${id}`, body));
     },
-    [categories]
+    [persist]
+  );
+
+  const deleteCategory = useCallback(
+    (id: string) => {
+      setAllCategories((prev) => prev.filter((c) => c.id !== id));
+      setAllTransactions((prev) =>
+        prev.map((t) =>
+          t.categoryId === id
+            ? { ...t, categoryId: null, categoryName: undefined, scheduleCLine: undefined }
+            : t
+        )
+      );
+      persist('Could not delete category', () => apiDelete(`/api/categories/${id}`));
+    },
+    [persist]
+  );
+
+  // ---- transactions ----------------------------------------------------------
+  const addTransaction = useCallback(
+    (data: Omit<Transaction, 'id'>) => {
+      const t = withCategory({ ...data, id: newClientId('tx') }, data.categoryId ?? null);
+      setAllTransactions((prev) => [t, ...prev]);
+      bumpBalance(t.accountId, t.amount);
+      persist('Could not save transaction', () => apiPost('/api/transactions', t));
+      return t;
+    },
+    [withCategory, bumpBalance, persist]
+  );
+
+  const addBatchTransactions = useCallback(
+    (list: Omit<Transaction, 'id'>[]) => {
+      if (!list.length) return;
+      const txs = list.map((d) => withCategory({ ...d, id: newClientId('tx') }, d.categoryId ?? null));
+      setAllTransactions((prev) => [...txs, ...prev]);
+      const deltas: Record<string, number> = {};
+      txs.forEach((t) => (deltas[t.accountId] = (deltas[t.accountId] || 0) + t.amount));
+      Object.entries(deltas).forEach(([acc, d]) => bumpBalance(acc, d));
+      persist('Could not save imported transactions', () => apiPost('/api/transactions/batch', { transactions: txs }));
+    },
+    [withCategory, bumpBalance, persist]
+  );
+
+  const updateTransaction = useCallback(
+    (id: string, updates: Partial<Transaction>) => {
+      const cur = allTransactions.find((t) => t.id === id);
+      if (!cur) return;
+      const moneyChange =
+        (updates.amount !== undefined && updates.amount !== cur.amount) ||
+        (updates.accountId !== undefined && updates.accountId !== cur.accountId) ||
+        (updates.date !== undefined && updates.date !== cur.date);
+      if (cur.reconciled && moneyChange) {
+        notify(
+          'This transaction is part of a reconciled statement. Delete that reconciliation before changing its date, amount or account.',
+          'error'
+        );
+        return;
+      }
+      let next: Transaction = { ...cur, ...updates };
+      if (updates.categoryId !== undefined) {
+        next = withCategory(next, updates.categoryId);
+        if (updates.aiConfidence === undefined) next.aiConfidence = undefined;
+        if (updates.aiReasoning === undefined) next.aiReasoning = undefined;
+      }
+      setAllTransactions((prev) => prev.map((t) => (t.id === id ? next : t)));
+      if (next.accountId === cur.accountId) bumpBalance(cur.accountId, next.amount - cur.amount);
+      else {
+        bumpBalance(cur.accountId, -cur.amount);
+        bumpBalance(next.accountId, next.amount);
+      }
+      const body: any = {};
+      (['date', 'payee', 'description', 'amount', 'accountId', 'categoryId', 'notes', 'aiConfidence', 'aiReasoning'] as const).forEach(
+        (k) => {
+          if (updates[k] !== undefined || (k === 'categoryId' && 'categoryId' in updates)) body[k] = (updates as any)[k] ?? null;
+        }
+      );
+      persist('Could not save changes', () => apiPatch(`/api/transactions/${id}`, body));
+    },
+    [allTransactions, withCategory, bumpBalance, persist, notify]
+  );
+
+  const deleteTransaction = useCallback(
+    (id: string) => {
+      const cur = allTransactions.find((t) => t.id === id);
+      if (!cur) return;
+      if (cur.reconciled) {
+        notify('This transaction is part of a reconciled statement. Delete that reconciliation first.', 'error');
+        return;
+      }
+      setAllTransactions((prev) => prev.filter((t) => t.id !== id));
+      bumpBalance(cur.accountId, -cur.amount);
+      persist('Could not delete transaction', () => apiDelete(`/api/transactions/${id}`));
+    },
+    [allTransactions, bumpBalance, persist, notify]
+  );
+
+  const categorizeTransaction = useCallback(
+    (id: string, categoryId: string | null) => updateTransaction(id, { categoryId }),
+    [updateTransaction]
   );
 
   const batchCategorizeTransactions = useCallback(
     (ids: string[], categoryId: string) => {
-      const cat = categories.find((c) => c.id === categoryId);
-      const idSet = new Set(ids);
+      if (!ids.length) return;
+      const set = new Set(ids);
       setAllTransactions((prev) =>
-        prev.map((t) =>
-          idSet.has(t.id)
-            ? {
-                ...t,
-                categoryId,
-                categoryName: cat?.name || undefined,
-                scheduleCLine: cat?.scheduleCLine || undefined,
-              }
-            : t
-        )
+        prev.map((t) => (set.has(t.id) ? { ...withCategory(t, categoryId), aiConfidence: undefined, aiReasoning: undefined } : t))
+      );
+      persist('Could not save categories', () =>
+        apiPost('/api/transactions/bulk-update', { updates: ids.map((id) => ({ id, categoryId })) })
       );
     },
-    [categories]
+    [withCategory, persist]
   );
 
-  // AI Auto-Categorization
+  // ---- AI categorization -------------------------------------------------------
   const autoCategorizeWithAI = useCallback(
     async (targetTxIds?: string[]) => {
       setIsAiCategorizing(true);
       try {
-        const txPool = targetTxIds
-          ? transactions.filter((t) => targetTxIds.includes(t.id))
-          : transactions.filter((t) => !t.categoryId);
+        const pool = (targetTxIds ? transactions.filter((t) => targetTxIds.includes(t.id)) : transactions.filter((t) => !t.categoryId)).slice(0, 500);
+        if (pool.length === 0) return { updatedCount: 0, suggestions: [] };
+        await queue.current; // make sure the server has everything we're about to ask about
 
-        if (txPool.length === 0) {
-          setIsAiCategorizing(false);
-          return { updatedCount: 0, suggestions: [] };
-        }
-
-        const res = await fetch('/api/ai/categorize', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            transactions: txPool,
-            categories: categories.map((c) => ({
-              id: c.id,
-              name: c.name,
-              type: c.type,
-              scheduleC: c.scheduleCLine,
-            })),
-            businessType: `${activeBusiness.name} (${activeBusiness.industry})`,
-          }),
+        const data = await api('POST', '/api/ai/categorize', {
+          transactions: pool.map((t) => ({ id: t.id, date: t.date, description: t.description, payee: t.payee, amount: t.amount })),
+          categories: categories.map((c) => ({ id: c.id, name: c.name, type: c.type, scheduleC: c.scheduleCLine })),
+          businessType: `${activeBusiness.name} (${activeBusiness.industry})`,
         });
-
-        if (!res.ok) {
-          const err = await res.json().catch(() => ({}));
-          throw new Error(err.error || `Failed to auto-categorize: ${res.statusText}`);
-        }
-
-        const data = await res.json();
         const suggestions: Array<{
           id: string;
           categoryId: string;
@@ -459,311 +473,123 @@ export const AccountingProvider: React.FC<{ children: React.ReactNode }> = ({ ch
           scheduleCLine?: string;
         }> = data.suggestions || [];
 
-        // Apply suggestions
-        const suggestionMap = new Map(suggestions.map((s) => [s.id, s]));
-
+        const map = new Map(suggestions.map((s) => [s.id, s]));
         setAllTransactions((prev) =>
           prev.map((t) => {
-            const suggestion = suggestionMap.get(t.id);
-            if (suggestion) {
-              const matchedCat = categories.find((c) => c.id === suggestion.categoryId);
-              return {
-                ...t,
-                categoryId: matchedCat ? matchedCat.id : suggestion.categoryId,
-                categoryName: matchedCat ? matchedCat.name : suggestion.categoryName,
-                scheduleCLine: matchedCat ? matchedCat.scheduleCLine : suggestion.scheduleCLine,
-                aiConfidence: suggestion.confidence,
-                aiReasoning: suggestion.reasoning,
-              };
-            }
-            return t;
+            const s = map.get(t.id);
+            return s ? { ...withCategory(t, s.categoryId), aiConfidence: s.confidence, aiReasoning: s.reasoning } : t;
           })
         );
-
+        if (suggestions.length) {
+          persist('Could not save AI categories', () =>
+            apiPost('/api/transactions/bulk-update', {
+              updates: suggestions.map((s) => ({
+                id: s.id,
+                categoryId: s.categoryId,
+                aiConfidence: s.confidence,
+                aiReasoning: s.reasoning,
+              })),
+            })
+          );
+        }
         return { updatedCount: suggestions.length, suggestions };
-      } catch (err: any) {
-        console.error('AI Categorization failed:', err);
-        throw err;
       } finally {
         setIsAiCategorizing(false);
       }
     },
-    [transactions, categories, activeBusiness]
+    [transactions, categories, activeBusiness, withCategory, persist]
   );
 
-  // Reconciliations
+  // ---- reconciliations ---------------------------------------------------------
   const saveReconciliation = useCallback(
     (rec: Reconciliation) => {
-      setAllReconciliations((prev) => {
-        const filtered = prev.filter((r) => r.id !== rec.id);
-        return [rec, ...filtered];
-      });
-
-      // Mark cleared transactions
-      const clearedSet = new Set(rec.clearedTransactionIds);
+      setAllReconciliations((prev) => [rec, ...prev.filter((r) => r.id !== rec.id)]);
+      const cleared = new Set(rec.clearedTransactionIds);
       setAllTransactions((prev) =>
         prev.map((t) => {
-          if (clearedSet.has(t.id)) {
-            return {
-              ...t,
-              reconciled: true,
-              reconciliationId: rec.id,
-            };
-          }
+          if (cleared.has(t.id)) return { ...t, reconciled: true, reconciliationId: rec.id };
+          if (t.reconciliationId === rec.id) return { ...t, reconciled: false, reconciliationId: undefined };
           return t;
         })
       );
+      persist('Could not save reconciliation', () => apiPut(`/api/reconciliations/${rec.id}`, rec));
     },
-    []
+    [persist]
   );
 
-  const deleteReconciliation = useCallback((id: string) => {
-    setAllReconciliations((prev) => prev.filter((r) => r.id !== id));
-    // Unmark transactions
-    setAllTransactions((prev) =>
-      prev.map((t) => (t.reconciliationId === id ? { ...t, reconciled: false, reconciliationId: undefined } : t))
-    );
-  }, []);
+  const deleteReconciliation = useCallback(
+    (id: string) => {
+      setAllReconciliations((prev) => prev.filter((r) => r.id !== id));
+      setAllTransactions((prev) =>
+        prev.map((t) => (t.reconciliationId === id ? { ...t, reconciled: false, reconciliationId: undefined } : t))
+      );
+      persist('Could not delete reconciliation', () => apiDelete(`/api/reconciliations/${id}`));
+    },
+    [persist]
+  );
 
-  // SimpleFIN Integration
-  const connectSimpleFinWithToken = useCallback(
-    async (setupToken: string) => {
+  // ---- SimpleFIN -----------------------------------------------------------------
+  const connectWith = useCallback(
+    async (path: 'claim' | 'connect', payload: object) => {
       setSyncError(null);
       setIsSyncing(true);
       try {
-        const res = await fetch('/api/simplefin/claim', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ setupToken }),
-        });
-
-        const data = await res.json();
-        if (!res.ok) {
-          throw new Error(data.error || 'Failed to claim SimpleFIN token');
-        }
-
-        const newConfig: SimpleFinBridgeConfig = {
-          businessId: activeBusinessId,
-          accessUrl: data.accessUrl,
-          isDemo: Boolean(data.isDemo),
-          lastSyncedAt: null,
-          status: 'connected',
-        };
-
-        setBridgeConfigs((prev) => ({
-          ...prev,
-          [activeBusinessId]: newConfig,
-        }));
-
-        setIsSyncing(false);
+        await queue.current;
+        const r = await apiPost(`/api/simplefin/${currentId}/${path}`, payload);
+        setBridgeConfigs((prev) => ({ ...prev, [currentId]: r.bridgeConfig }));
         return { success: true };
-      } catch (err: any) {
-        setSyncError(err.message || 'SimpleFIN setup failed');
+      } catch (e: any) {
+        setSyncError(e.message || 'SimpleFIN setup failed');
+        return { success: false, error: e.message as string };
+      } finally {
         setIsSyncing(false);
-        return { success: false, error: err.message };
       }
     },
-    [activeBusinessId]
+    [currentId]
   );
 
-  const connectSimpleFinAccessUrl = useCallback(
-    (accessUrl: string, isDemo: boolean = false) => {
-      setBridgeConfigs((prev) => ({
-        ...prev,
-        [activeBusinessId]: {
-          businessId: activeBusinessId,
-          accessUrl,
-          isDemo,
-          lastSyncedAt: null,
-          status: 'connected',
-        },
-      }));
-      setSyncError(null);
-    },
-    [activeBusinessId]
-  );
+  const connectSimpleFinWithToken = useCallback((setupToken: string) => connectWith('claim', { setupToken }), [connectWith]);
+  const connectSimpleFinAccessUrl = useCallback((accessUrl: string) => connectWith('connect', { accessUrl }), [connectWith]);
 
   const disconnectSimpleFin = useCallback(() => {
     setBridgeConfigs((prev) => ({
       ...prev,
-      [activeBusinessId]: {
-        businessId: activeBusinessId,
-        accessUrl: '',
-        isDemo: false,
-        lastSyncedAt: null,
-        status: 'disconnected',
-      },
+      [currentId]: { businessId: currentId, accessUrl: '', isDemo: false, lastSyncedAt: null, status: 'disconnected' },
     }));
-  }, [activeBusinessId]);
+    persist('Could not disconnect SimpleFIN', () => apiDelete(`/api/simplefin/${currentId}`));
+  }, [currentId, persist]);
 
   const syncSimpleFin = useCallback(async () => {
-    const config = bridgeConfigs[activeBusinessId];
-    if (!config || !config.accessUrl) {
-      throw new Error('SimpleFIN is not connected for this business.');
-    }
-
+    if (bridgeConfig.status === 'disconnected') throw new Error('SimpleFIN is not connected for this business.');
     setIsSyncing(true);
     setSyncError(null);
-
     try {
-      const res = await fetch('/api/simplefin/sync', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          accessUrl: config.accessUrl,
-          isDemo: config.isDemo,
-        }),
-      });
-
-      const data = await res.json();
-      if (!res.ok) {
-        throw new Error(data.error || 'Failed to sync with SimpleFIN');
-      }
-
-      const sfinAccounts: any[] = data.accounts || [];
-      let newTransactionsCount = 0;
-
-      // Map or create accounts
-      const existingAccountMap = new Map(
-        allAccounts
-          .filter((a) => a.businessId === activeBusinessId)
-          .map((a) => [a.simplefinAccountId || a.id, a])
-      );
-
-      const updatedAccountsList = [...allAccounts];
-      const newTransactionsToAdd: Omit<Transaction, 'id'>[] = [];
-
-      for (const sAccount of sfinAccounts) {
-        let localAccount = existingAccountMap.get(sAccount.id);
-
-        const parsedBalance = parseFloat(sAccount.balance || '0');
-        const parsedAvailable = parseFloat(sAccount['available-balance'] || sAccount.balance || '0');
-
-        if (localAccount) {
-          // Update existing account balance
-          const idx = updatedAccountsList.findIndex((a) => a.id === localAccount?.id);
-          if (idx !== -1) {
-            updatedAccountsList[idx] = {
-              ...updatedAccountsList[idx],
-              currentBalance: parsedBalance,
-              availableBalance: parsedAvailable,
-              lastSyncedAt: new Date().toISOString(),
-            };
-          }
-        } else {
-          // Detect type
-          const nameLower = (sAccount.name || '').toLowerCase();
-          let accType: Account['type'] = 'checking';
-          if (nameLower.includes('credit') || nameLower.includes('card') || nameLower.includes('visa')) {
-            accType = 'credit_card';
-          } else if (nameLower.includes('savings')) {
-            accType = 'savings';
-          } else if (nameLower.includes('mortgage')) {
-            accType = 'mortgage';
-          } else if (nameLower.includes('loan')) {
-            accType = 'loan';
-          }
-
-          const createdAccount: Account = {
-            id: `act_sfin_${Date.now()}_${Math.random().toString(36).substring(2, 5)}`,
-            businessId: activeBusinessId,
-            name: sAccount.name || 'Synced Account',
-            type: accType,
-            institution: sAccount.org?.name || 'Bank',
-            accountNumberLast4: sAccount.id.slice(-4),
-            currentBalance: parsedBalance,
-            availableBalance: parsedAvailable,
-            simplefinAccountId: sAccount.id,
-            lastSyncedAt: new Date().toISOString(),
-          };
-
-          updatedAccountsList.push(createdAccount);
-          localAccount = createdAccount;
-        }
-
-        // Import transactions
-        const existingTxDescriptions = new Set(
-          allTransactions
-            .filter((t) => t.businessId === activeBusinessId && t.accountId === localAccount?.id)
-            .map((t) => `${t.date}_${t.amount}_${t.description}`)
-        );
-
-        if (Array.isArray(sAccount.transactions)) {
-          for (const sTx of sAccount.transactions) {
-            const txDate = sTx.posted
-              ? new Date(sTx.posted * 1000).toISOString().split('T')[0]
-              : new Date().toISOString().split('T')[0];
-            const txAmount = parseFloat(sTx.amount || '0');
-            const txDesc = sTx.description || sTx.memo || 'Bank Transaction';
-            const sigKey = `${txDate}_${txAmount}_${txDesc}`;
-
-            if (!existingTxDescriptions.has(sigKey)) {
-              newTransactionsToAdd.push({
-                businessId: activeBusinessId,
-                accountId: localAccount.id,
-                date: txDate,
-                payee: sTx.payee || txDesc,
-                description: txDesc,
-                amount: txAmount,
-                categoryId: null, // Uncategorized, ready for AI
-                reconciled: false,
-                source: 'simplefin',
-                notes: sTx.memo,
-              });
-              newTransactionsCount++;
-            }
-          }
-        }
-      }
-
-      setAllAccounts(updatedAccountsList);
-      if (newTransactionsToAdd.length > 0) {
-        addBatchTransactions(newTransactionsToAdd);
-      }
-
-      // Update bridge config synced time
-      setBridgeConfigs((prev) => ({
-        ...prev,
-        [activeBusinessId]: {
-          ...config,
-          lastSyncedAt: new Date().toISOString(),
-          status: 'connected',
-        },
-      }));
-
+      await queue.current;
+      const r = await apiPost(`/api/simplefin/${currentId}/sync`);
+      // swap this business's data for the server's fresh copy
+      setAllAccounts((prev) => [...prev.filter((a) => a.businessId !== currentId), ...r.accounts]);
+      setAllTransactions((prev) => [...prev.filter((t) => t.businessId !== currentId), ...r.transactions]);
+      setBridgeConfigs((prev) => ({ ...prev, ...r.bridgeConfigs }));
+      return { addedCount: r.addedCount as number, message: r.message as string };
+    } catch (e: any) {
+      setSyncError(e.message || 'Sync failed');
+      reloadRef.current();
+      throw e;
+    } finally {
       setIsSyncing(false);
-      return {
-        addedCount: newTransactionsCount,
-        message: `Synced ${sfinAccounts.length} accounts. Imported ${newTransactionsCount} new transactions.`,
-      };
-    } catch (err: any) {
-      setSyncError(err.message || 'Sync failed');
-      setIsSyncing(false);
-      throw err;
     }
-  }, [bridgeConfigs, activeBusinessId, allAccounts, allTransactions, addBatchTransactions]);
+  }, [bridgeConfig.status, currentId]);
 
-  const resetAllToDefaults = useCallback(() => {
-    localStorage.removeItem(STORAGE_KEYS.BUSINESSES);
-    localStorage.removeItem(STORAGE_KEYS.ACTIVE_BIZ);
-    localStorage.removeItem(STORAGE_KEYS.ACCOUNTS);
-    localStorage.removeItem(STORAGE_KEYS.CATEGORIES);
-    localStorage.removeItem(STORAGE_KEYS.TRANSACTIONS);
-    localStorage.removeItem(STORAGE_KEYS.RECONCILIATIONS);
-    localStorage.removeItem(STORAGE_KEYS.BRIDGE_CONFIGS);
+  const value: AccountingContextType = {
+    loading,
+    loadError,
+    reload,
+    notice,
+    notify,
+    dismissNotice,
 
-    setBusinesses(INITIAL_BUSINESSES);
-    setActiveBusinessIdState(INITIAL_BUSINESSES[0].id);
-    setAllAccounts(INITIAL_ACCOUNTS);
-    setCategories(DEFAULT_CATEGORIES);
-    setAllTransactions(INITIAL_TRANSACTIONS);
-    setAllReconciliations(INITIAL_RECONCILIATIONS);
-    setBridgeConfigs(INITIAL_BRIDGE_CONFIGS);
-  }, []);
-
-  const value = {
     businesses,
-    activeBusinessId,
+    activeBusinessId: currentId,
     activeBusiness,
     setActiveBusinessId,
     addBusiness,
@@ -779,6 +605,7 @@ export const AccountingProvider: React.FC<{ children: React.ReactNode }> = ({ ch
     categories,
     addCategory,
     updateCategory,
+    deleteCategory,
 
     transactions,
     allTransactions,
@@ -802,8 +629,6 @@ export const AccountingProvider: React.FC<{ children: React.ReactNode }> = ({ ch
     syncSimpleFin,
     isSyncing,
     syncError,
-
-    resetAllToDefaults,
   };
 
   return <AccountingContext.Provider value={value}>{children}</AccountingContext.Provider>;
@@ -811,8 +636,6 @@ export const AccountingProvider: React.FC<{ children: React.ReactNode }> = ({ ch
 
 export const useAccounting = () => {
   const context = useContext(AccountingContext);
-  if (!context) {
-    throw new Error('useAccounting must be used within an AccountingProvider');
-  }
+  if (!context) throw new Error('useAccounting must be used within an AccountingProvider');
   return context;
 };

@@ -1,5 +1,10 @@
 import React, { useState } from 'react';
 import { AccountingProvider, useAccounting } from './context/AccountingContext.tsx';
+import { AuthProvider, useAuth } from './context/AuthContext.tsx';
+import { AuthScreen } from './components/auth/AuthScreen.tsx';
+import { OnboardingWizard } from './components/onboarding/OnboardingWizard.tsx';
+import type { Transaction } from './types.ts';
+import { Toast } from './components/Toast.tsx';
 import { Header } from './components/Header.tsx';
 import { DashboardView } from './components/views/DashboardView.tsx';
 import { TransactionsView } from './components/views/TransactionsView.tsx';
@@ -19,6 +24,7 @@ function MainApp() {
   // Modals
   const [isAddBusinessOpen, setIsAddBusinessOpen] = useState(false);
   const [isAddTransactionOpen, setIsAddTransactionOpen] = useState(false);
+  const [editingTx, setEditingTx] = useState<Transaction | null>(null);
   const [isImportCsvOpen, setIsImportCsvOpen] = useState(false);
   const [isAiReviewOpen, setIsAiReviewOpen] = useState(false);
 
@@ -42,6 +48,7 @@ function MainApp() {
         {activeTab === 'transactions' && (
           <TransactionsView
             onOpenAddTransaction={() => setIsAddTransactionOpen(true)}
+            onEditTransaction={setEditingTx}
             onOpenImportCsv={() => setIsImportCsvOpen(true)}
             onOpenAiReview={() => setIsAiReviewOpen(true)}
           />
@@ -86,8 +93,12 @@ function MainApp() {
       />
 
       <AddTransactionModal
-        isOpen={isAddTransactionOpen}
-        onClose={() => setIsAddTransactionOpen(false)}
+        isOpen={isAddTransactionOpen || editingTx !== null}
+        transaction={editingTx}
+        onClose={() => {
+          setIsAddTransactionOpen(false);
+          setEditingTx(null);
+        }}
       />
 
       <ImportCsvModal
@@ -103,10 +114,59 @@ function MainApp() {
   );
 }
 
+function FullScreenMessage({ title, detail, action }: { title: string; detail?: string; action?: React.ReactNode }) {
+  return (
+    <div className="min-h-screen bg-slate-50 flex items-center justify-center p-6">
+      <div className="text-center max-w-sm">
+        <div className="text-lg font-semibold text-slate-800">{title}</div>
+        {detail && <p className="mt-2 text-sm text-slate-500">{detail}</p>}
+        {action && <div className="mt-4">{action}</div>}
+      </div>
+    </div>
+  );
+}
+
+/** Loads the user's data, then shows onboarding (no businesses yet) or the main app. */
+function DataGate() {
+  const { loading, loadError, reload, businesses } = useAccounting();
+  if (loading) return <FullScreenMessage title="Loading your books..." />;
+  if (loadError) {
+    return (
+      <FullScreenMessage
+        title="Couldn't load your data"
+        detail={loadError}
+        action={
+          <button onClick={reload} className="px-4 py-2 rounded-lg bg-indigo-600 text-white text-sm font-medium hover:bg-indigo-700">
+            Try again
+          </button>
+        }
+      />
+    );
+  }
+  return (
+    <>
+      {businesses.length === 0 ? <OnboardingWizard /> : <MainApp />}
+      <Toast />
+    </>
+  );
+}
+
+/** Signed out -> setup/login screen. Signed in -> data. Keyed by user so data never leaks between sessions. */
+function AuthGate() {
+  const { loading, user } = useAuth();
+  if (loading) return <FullScreenMessage title="LiteLedger" />;
+  if (!user) return <AuthScreen />;
+  return (
+    <AccountingProvider key={user.id}>
+      <DataGate />
+    </AccountingProvider>
+  );
+}
+
 export default function App() {
   return (
-    <AccountingProvider>
-      <MainApp />
-    </AccountingProvider>
+    <AuthProvider>
+      <AuthGate />
+    </AuthProvider>
   );
 }

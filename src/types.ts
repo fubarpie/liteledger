@@ -43,6 +43,7 @@ export type CategoryType = 'income' | 'cogs' | 'expense' | 'transfer' | 'equity'
 
 export interface Category {
   id: string;
+  businessId?: string;
   name: string;
   type: CategoryType;
   scheduleCLine: string;
@@ -96,4 +97,11 @@ export interface SimpleFinBridgeConfig {
   lastSyncedAt: string | null;
   status: 'connected' | 'disconnected' | 'error';
   errorMessage?: string;
+}
+
+export interface AuthUser {
+  id: string;
+  email: string;
+  name: string;
+  role: 'admin' | 'member';
 }

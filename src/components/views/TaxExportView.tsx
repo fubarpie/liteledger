@@ -15,112 +15,139 @@ import {
 export const TaxExportView: React.FC = () => {
   const { activeBusiness, categories, transactions, accounts } = useAccounting();
 
-  const currentYear = new Date().getFullYear();
+  const safeCategories = categories || [];
+  const safeTransactions = transactions || [];
+  const safeAccounts = accounts || [];
+
+  const pad = (n: number) => String(n).padStart(2, '0');
+  const fmtDate = (d: Date) => `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+  const toCents = (n: number) => Math.round((Number(n) || 0) * 100);
+
+  // Fiscal year (from activeBusiness.fiscalYearEnd 'MM-DD') identified by the year in which it ends
+  const fyEnd = useMemo(() => {
+    const m = /^(\d{1,2})-(\d{1,2})$/.exec(activeBusiness?.fiscalYearEnd || '');
+    let month = m ? Number(m[1]) : 12;
+    let day = m ? Number(m[2]) : 31;
+    if (month < 1 || month > 12) { month = 12; day = 31; }
+    return { month, day };
+  }, [activeBusiness?.fiscalYearEnd]);
+  const endOfFy = (y: number) =>
+    new Date(y, fyEnd.month - 1, Math.min(Math.max(fyEnd.day, 1), new Date(y, fyEnd.month, 0).getDate()));
+  const fyRange = (endYear: number) => {
+    const prev = endOfFy(endYear - 1);
+    return {
+      start: fmtDate(new Date(prev.getFullYear(), prev.getMonth(), prev.getDate() + 1)),
+      end: fmtDate(endOfFy(endYear)),
+    };
+  };
+
+  const today = new Date();
+  const currentYear = today.getFullYear() + (today > endOfFy(today.getFullYear()) ? 1 : 0);
   const [selectedTaxYear, setSelectedTaxYear] = useState<number>(currentYear);
 
-  const yearStartDate = `${selectedTaxYear}-01-01`;
-  const yearEndDate = `${selectedTaxYear}-12-31`;
+  const { start: yearStartDate, end: yearEndDate } = fyRange(selectedTaxYear);
+
+  const yearOptions = useMemo(() => {
+    const set = new Set<number>([currentYear, currentYear - 1, currentYear - 2, selectedTaxYear]);
+    safeTransactions.forEach((t) => {
+      const y = parseInt((t.date || '').slice(0, 4), 10);
+      if (!Number.isFinite(y)) return;
+      for (const ey of [y, y + 1]) {
+        const r = fyRange(ey);
+        if (t.date >= r.start && t.date <= r.end) set.add(ey);
+      }
+    });
+    return Array.from(set).sort((x, y) => y - x);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [safeTransactions, currentYear, selectedTaxYear, fyEnd]);
 
   // Transactions for the tax year
   const yearTransactions = useMemo(() => {
-    return transactions.filter(
-      (t) => t.date >= yearStartDate && t.date <= yearEndDate
-    );
-  }, [transactions, yearStartDate, yearEndDate]);
+    return safeTransactions.filter((t) => t.date >= yearStartDate && t.date <= yearEndDate);
+  }, [safeTransactions, yearStartDate, yearEndDate]);
 
   // Account map
-  const accountMap = useMemo(() => {
-    return new Map(accounts.map((a) => [a.id, a]));
-  }, [accounts]);
+  const accountMap = useMemo(() => new Map(safeAccounts.map((a) => [a.id, a])), [safeAccounts]);
 
-  // Map transactions by category
+  // Sum (integer cents) of transactions by category
   const categoryTotals = useMemo(() => {
     const map = new Map<string, number>();
     yearTransactions.forEach((t) => {
-      if (t.categoryId) {
-        const cur = map.get(t.categoryId) || 0;
-        map.set(t.categoryId, cur + t.amount);
-      }
+      if (t.categoryId) map.set(t.categoryId, (map.get(t.categoryId) || 0) + toCents(t.amount));
     });
     return map;
   }, [yearTransactions]);
 
-  // Group by Schedule C Tax Line
+  const isMealsCat = (c: { name: string; scheduleCLine?: string }) =>
+    /meals/i.test(c.scheduleCLine || '') || /meals/i.test(c.name || '');
+
+  // Group by Schedule C Tax Line (income/cogs/expense only; transfers & equity never reach tax lines)
   const scheduleCLines = useMemo(() => {
     const lines: Record<
       string,
-      {
-        lineName: string;
-        categories: { name: string; amount: number }[];
-        totalAmount: number;
-        note?: string;
-      }
+      { lineName: string; categories: { name: string; amount: number }[]; totalCents: number; totalAmount: number; isMeals: boolean }
     > = {};
 
-    categories.forEach((cat) => {
+    safeCategories.forEach((cat) => {
+      if (cat.type !== 'income' && cat.type !== 'cogs' && cat.type !== 'expense') return;
       const lineKey = cat.scheduleCLine || 'Other Expenses';
-      const rawAmt = categoryTotals.get(cat.id) || 0;
-      if (rawAmt === 0) return;
-
-      const amt = cat.type === 'income' ? rawAmt : Math.abs(rawAmt);
+      const rawCents = categoryTotals.get(cat.id) || 0;
+      if (rawCents === 0) return;
+      const cents = cat.type === 'income' ? rawCents : -rawCents;
 
       if (!lines[lineKey]) {
-        lines[lineKey] = {
-          lineName: lineKey,
-          categories: [],
-          totalAmount: 0,
-        };
+        lines[lineKey] = { lineName: lineKey, categories: [], totalCents: 0, totalAmount: 0, isMeals: false };
       }
-
-      lines[lineKey].categories.push({ name: cat.name, amount: amt });
-      lines[lineKey].totalAmount += amt;
+      lines[lineKey].categories.push({ name: cat.name, amount: cents / 100 });
+      lines[lineKey].totalCents += cents;
+      lines[lineKey].totalAmount = lines[lineKey].totalCents / 100;
+      if (isMealsCat(cat)) lines[lineKey].isMeals = true;
     });
 
     return Object.values(lines).sort((a, b) => a.lineName.localeCompare(b.lineName));
-  }, [categories, categoryTotals]);
+  }, [safeCategories, categoryTotals]);
 
-  // Specific tax totals
-  const grossSales = categories
+  // Specific tax totals (cents)
+  const grossC = safeCategories
     .filter((c) => c.type === 'income')
     .reduce((sum, c) => sum + (categoryTotals.get(c.id) || 0), 0);
-
-  const cogsTotal = categories
+  const cogsC = safeCategories
     .filter((c) => c.type === 'cogs')
-    .reduce((sum, c) => sum + Math.abs(categoryTotals.get(c.id) || 0), 0);
-
-  const grossProfit = grossSales - cogsTotal;
-
-  const totalDeductibleExpenses = categories
+    .reduce((sum, c) => sum - (categoryTotals.get(c.id) || 0), 0);
+  const deductC = safeCategories
     .filter((c) => c.type === 'expense')
     .reduce((sum, c) => {
-      let amt = Math.abs(categoryTotals.get(c.id) || 0);
+      let v = -(categoryTotals.get(c.id) || 0);
       // IRS 50% rule for business meals
-      if (c.id === 'exp_meals') {
-        amt = amt * 0.5;
-      }
-      return sum + amt;
+      if (isMealsCat(c)) v = Math.round(v * 0.5);
+      return sum + v;
     }, 0);
 
-  const estimatedScheduleCNet = grossProfit - totalDeductibleExpenses;
+  const grossSales = grossC / 100;
+  const cogsTotal = cogsC / 100;
+  const grossProfit = (grossC - cogsC) / 100;
+  const totalDeductibleExpenses = deductC / 100;
+  const estimatedScheduleCNet = (grossC - cogsC - deductC) / 100;
 
-  const uncategorizedCount = yearTransactions.filter((t) => !t.categoryId).length;
+  const knownCategoryIds = useMemo(() => new Set(safeCategories.map((c) => c.id)), [safeCategories]);
+  const uncategorizedCount = yearTransactions.filter((t) => !t.categoryId || !knownCategoryIds.has(t.categoryId)).length;
 
   const formatCurrency = (val: number) => {
     return new Intl.NumberFormat('en-US', {
       style: 'currency',
-      currency: activeBusiness.currency || 'USD',
+      currency: activeBusiness?.currency || 'USD',
       minimumFractionDigits: 2,
-    }).format(val);
+    }).format(Number.isFinite(val) ? val : 0);
   };
 
   // Export 1: Schedule C Summary CSV
   const handleExportScheduleCCsv = () => {
     const rows = [
       [`TAX PREPARATION REPORT - SCHEDULE C (FORM 1040)`],
-      [`Tax Year: ${selectedTaxYear}`],
-      [`Business Entity: ${activeBusiness.name}`],
-      [`Legal Name: ${activeBusiness.legalName}`],
-      [`EIN / Tax ID: ${activeBusiness.ein}`],
+      [`Tax Year: ${selectedTaxYear} (${yearStartDate} to ${yearEndDate})`],
+      [`Business Entity: ${activeBusiness?.name || ''}`],
+      [`Legal Name: ${activeBusiness?.legalName || ''}`],
+      [`EIN / Tax ID: ${activeBusiness?.ein || ''}`],
       [`Accounting Method: Cash Basis`],
       [''],
       ['IRS Schedule C Line', 'Category Component', 'Amount (USD)', 'Tax Notes'],
@@ -129,7 +156,7 @@ export const TaxExportView: React.FC = () => {
           i === 0 ? line.lineName : '',
           c.name,
           c.amount.toFixed(2),
-          line.lineName.includes('Meals') ? '50% Deductible Limitation Applies' : '',
+          line.isMeals ? '50% Deductible Limitation Applies' : '',
         ])
       ),
       [''],
@@ -143,7 +170,7 @@ export const TaxExportView: React.FC = () => {
 
     downloadCsv(
       rows,
-      `Schedule_C_Tax_Summary_${activeBusiness.name.replace(/\s+/g, '_')}_${selectedTaxYear}.csv`
+      `Schedule_C_Tax_Summary_${safeName}_${selectedTaxYear}.csv`
     );
   };
 
@@ -152,7 +179,7 @@ export const TaxExportView: React.FC = () => {
     const rows = [
       [`GENERAL LEDGER TRANSACTION JOURNAL`],
       [`Tax Year: ${selectedTaxYear} (${yearStartDate} to ${yearEndDate})`],
-      [`Business: ${activeBusiness.name} (EIN: ${activeBusiness.ein})`],
+      [`Business: ${activeBusiness?.name || ''} (EIN: ${activeBusiness?.ein || ''})`],
       [''],
       [
         'Date',
@@ -173,10 +200,10 @@ export const TaxExportView: React.FC = () => {
           acc ? `${acc.name} (•••• ${acc.accountNumberLast4})` : 'Account',
           t.payee || '',
           t.description || '',
-          t.categoryName || 'Uncategorized',
+          (t.categoryId && knownCategoryIds.has(t.categoryId) ? t.categoryName : '') || 'Uncategorized',
           t.scheduleCLine || '',
           t.amount > 0 ? 'Income/Deposit' : 'Expense/Charge',
-          t.amount.toFixed(2),
+          (toCents(t.amount) / 100).toFixed(2),
           t.reconciled ? 'Reconciled' : 'Pending',
           t.notes || '',
         ];
@@ -185,7 +212,7 @@ export const TaxExportView: React.FC = () => {
 
     downloadCsv(
       rows,
-      `General_Ledger_Journal_${activeBusiness.name.replace(/\s+/g, '_')}_${selectedTaxYear}.csv`
+      `General_Ledger_Journal_${safeName}_${selectedTaxYear}.csv`
     );
   };
 
@@ -197,18 +224,25 @@ export const TaxExportView: React.FC = () => {
     }, 400);
   };
 
-  const downloadCsv = (rows: string[][], filename: string) => {
-    const csvContent =
-      'data:text/csv;charset=utf-8,' +
-      rows.map((r) => r.map((cell) => `"${(cell || '').replace(/"/g, '""')}"`).join(',')).join('\n');
+  const safeName = (activeBusiness?.name || 'business').replace(/[^A-Za-z0-9]+/g, '_').replace(/^_+|_+$/g, '') || 'business';
 
-    const encodedUri = encodeURI(csvContent);
+  const downloadCsv = (rows: unknown[][], filename: string) => {
+    // RFC 4180 quoting + CSV/formula-injection guard (numeric cells are left untouched)
+    const esc = (cell: unknown) => {
+      let v = String(cell ?? '');
+      if (/^[=+\-@\t\r]/.test(v) && !/^-?\d+(\.\d+)?$/.test(v)) v = "'" + v;
+      return `"${v.replace(/"/g, '""')}"`;
+    };
+    const csv = rows.map((r) => r.map(esc).join(',')).join('\r\n');
+    const blob = new Blob(['\uFEFF' + csv], { type: 'text/csv;charset=utf-8' });
+    const encodedUri = URL.createObjectURL(blob);
     const link = document.createElement('a');
     link.setAttribute('href', encodedUri);
     link.setAttribute('download', filename);
     document.body.appendChild(link);
     link.click();
     document.body.removeChild(link);
+    setTimeout(() => URL.revokeObjectURL(encodedUri), 1000);
   };
 
   return (
@@ -238,7 +272,7 @@ export const TaxExportView: React.FC = () => {
             onChange={(e) => setSelectedTaxYear(parseInt(e.target.value, 10))}
             className="px-3 py-1.5 text-xs font-bold font-mono rounded-lg border border-slate-200 bg-white text-slate-900 focus:outline-none focus:ring-1 focus:ring-teal-500"
           >
-            {[currentYear, currentYear - 1, currentYear - 2].map((yr) => (
+            {yearOptions.map((yr) => (
               <option key={yr} value={yr}>
                 {yr}
               </option>
@@ -335,7 +369,7 @@ export const TaxExportView: React.FC = () => {
               Tax Year {selectedTaxYear} Schedule C Mapping Review
             </h2>
             <p className="text-xs text-slate-500 mt-0.5">
-              Entity: {activeBusiness.name} (EIN: {activeBusiness.ein}) · Cash Accounting
+              Entity: {activeBusiness?.name} (EIN: {activeBusiness?.ein || 'not set'}) · Cash Accounting
             </p>
           </div>
           <button
@@ -348,9 +382,14 @@ export const TaxExportView: React.FC = () => {
         </div>
 
         <div className="divide-y divide-slate-100">
+          {scheduleCLines.length === 0 && (
+            <div className="p-8 text-center text-xs text-slate-500">
+              No categorized income or expenses found for tax year {selectedTaxYear} ({yearStartDate} to {yearEndDate}).
+            </div>
+          )}
           {scheduleCLines.map((line, idx) => {
-            const isMeals = line.lineName.includes('Meals');
-            const deductibleAmt = isMeals ? line.totalAmount * 0.5 : line.totalAmount;
+            const isMeals = line.isMeals;
+            const deductibleAmt = isMeals ? Math.round(line.totalCents * 0.5) / 100 : line.totalAmount;
 
             return (
               <div key={idx} className="p-4 sm:px-6 flex flex-col sm:flex-row sm:items-center justify-between gap-2 hover:bg-slate-50/50">
@@ -393,9 +432,9 @@ export const TaxExportView: React.FC = () => {
           </div>
 
           <div>
-            <span className="text-slate-500 block text-[11px]">Total Deductible Expenses:</span>
+            <span className="text-slate-500 block text-[11px]">Total Deductible Expenses (incl. COGS):</span>
             <span className="text-base font-bold font-mono text-slate-900">
-              {formatCurrency(totalDeductibleExpenses + cogsTotal)}
+              {formatCurrency((deductC + cogsC) / 100)}
             </span>
           </div>
 
